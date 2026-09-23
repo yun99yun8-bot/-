@@ -1,97 +1,401 @@
-import os, threading, time
-from collections import Counter
+import os
+import time
+import threading
+from collections import Counter, deque
 from datetime import datetime, timezone
+
 import requests
 from flask import Flask, jsonify, render_template_string
 
 app = Flask(__name__)
-TRON_URL = 'https://api.trongrid.io/wallet/getnowblock'
-API_KEY = os.getenv('TRON_PRO_API_KEY', '')
-POLL_SECONDS = float(os.getenv('POLL_SECONDS', '1'))
-HISTORY_LIMIT = 200
-lock = threading.Lock()
-seen = set()
-state = dict(status='启动中', current_block=None, current_hash=None, current_result=None,
-             current_letters=None, current_digits=None, current_minute=None,
-             minute_snapshots=0, minute_unique_blocks=0, minute_frequency=Counter(),
-             history=[], error=None)
 
-def calc(h):
-    lr, dr = [], []
-    for ch in reversed(h.lower()):
-        if ch in 'abcde' and len(lr) < 7: lr.append(ch)
-        if ch.isdigit() and len(dr) < 7: dr.append(ch)
-        if len(lr) == 7 and len(dr) == 7: break
-    if len(lr) < 7 or len(dr) < 7: return None
-    letters, digits = lr[::-1], dr[::-1]
-    mp = {'a':'0','b':'1','c':'2','d':'3','e':'4'}
-    nums = [f'{int(mp[a]+b):02d}' for a,b in zip(letters,digits)]
-    return {'numbers': nums, 'letters': ''.join(x.upper() for x in letters), 'digits': ''.join(digits)}
+TRON_URL = "https://api.trongrid.io/wallet/getnowblock"
+API_KEY = os.getenv("TRON_PRO_API_KEY", "")
+POLL_SECONDS = float(os.getenv("POLL_SECONDS", "1"))
+HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "5000"))
 
-def parity(nums):
-    odd = sum(int(n[-1]) % 2 for n in nums)
-    even = 7 - odd
-    return {'odd': odd, 'even': even, 'label': f'{odd}单{even}双'}
+state_lock = threading.Lock()
+latest = {
+    "block": None, "hash": None, "numbers": None, "letters": None,
+    "digits": None, "minute": None, "updated": None
+}
+history = deque(maxlen=HISTORY_LIMIT)
+seen_blocks = set()
 
-def minute(): return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')
+
+def calculate_hash(h):
+    """按既定规则：从右向左取前7个A-E和前7个数字，再恢复顺序并配对。"""
+    h = (h or "").lower()
+    letters, digits = [], []
+
+    for ch in reversed(h):
+        if ch in "abcde" and len(letters) < 7:
+            letters.append(ch)
+        if ch.isdigit() and len(digits) < 7:
+            digits.append(ch)
+        if len(letters) == 7 and len(digits) == 7:
+            break
+
+    if len(letters) < 7 or len(digits) < 7:
+        return None
+
+    letters.reverse()
+    digits.reverse()
+    mp = {"a": 0, "b": 1, "c": 2, "d": 3, "e": 4}
+    nums = [mp[a] * 10 + int(d) for a, d in zip(letters, digits)]
+
+    return {
+        "numbers": nums,
+        "letters": "".join(letters).upper(),
+        "digits": "".join(digits),
+    }
+
+
+def parity(numbers):
+    odd = sum(n % 2 for n in numbers)
+    return odd, len(numbers) - odd
+
+
+def tail_parity(numbers):
+    """尾数单双：取每个号码个位数判断单双。"""
+    odd = sum((n % 10) % 2 for n in numbers)
+    return odd, len(numbers) - odd
+
+
+def add_record(block, block_hash, calc, block_time):
+    if not calc or block is None:
+        return
+
+    block_key = str(block)
+
+    with state_lock:
+        if block_key in seen_blocks:
+            return
+        seen_blocks.add(block_key)
+
+        try:
+            dt = datetime.fromtimestamp(
+                int(block_time) / 1000, tz=timezone.utc
+            )
+        except Exception:
+            dt = datetime.now(timezone.utc)
+
+        nums = calc["numbers"]
+        odd, even = parity(nums)
+        tail_odd, tail_even = tail_parity(nums)
+
+        rec = {
+            "block": block,
+            "hash": block_hash,
+            "numbers": nums,
+            "letters": calc["letters"],
+            "digits": calc["digits"],
+            "minute": dt.strftime("%Y-%m-%d %H:%M"),
+            "time": dt.strftime("%H:%M:%S"),
+            "odd": odd,
+            "even": even,
+            "tail_odd": tail_odd,
+            "tail_even": tail_even,
+        }
+
+        history.appendleft(rec)
+
+        latest.update({
+            "block": block,
+            "hash": block_hash,
+            "numbers": nums,
+            "letters": calc["letters"],
+            "digits": calc["digits"],
+            "minute": rec["minute"],
+            "updated": datetime.now(timezone.utc).isoformat(),
+            "odd": odd,
+            "even": even,
+            "tail_odd": tail_odd,
+            "tail_even": tail_even,
+        })
+
 
 def fetch_block():
-    headers = {'TRON-PRO-API-KEY': API_KEY} if API_KEY else {}
-    r = requests.get(TRON_URL, headers=headers, timeout=10); r.raise_for_status()
-    d = r.json(); raw = d.get('block_header',{}).get('raw_data',{})
-    if not d.get('blockID'): raise RuntimeError(f'TRON API 未返回 blockID: {d}')
-    return str(raw.get('number','-')), d['blockID']
+    headers = {}
+    if API_KEY:
+        headers["TRON-PRO-API-KEY"] = API_KEY
 
-def add(block, h, c, m):
-    p = parity(c['numbers']); key = '|'.join(c['numbers'])
-    with lock:
-        if h in seen: return
-        seen.add(h)
-        dup = sum(x['numbers_key'] == key for x in state['history']) + 1
-        item = {'time':datetime.now(timezone.utc).strftime('%H:%M:%S'),'minute':m,
-                'block':block,'hash':h,'numbers':c['numbers'],'numbers_key':key,
-                'letters':c['letters'],'digits':c['digits'], 'odd':p['odd'],'even':p['even'],
-                'parity':p['label'],'duplicate_count':dup}
-        state['history'].insert(0,item); state['history'] = state['history'][:HISTORY_LIMIT]
-        state.update(current_block=block,current_hash=h,current_result=c['numbers'],
-                     current_letters=c['letters'],current_digits=c['digits'],current_minute=m,
-                     minute_unique_blocks=state['minute_unique_blocks']+1)
-        for n in c['numbers']: state['minute_frequency'][n] += 1
+    response = requests.get(TRON_URL, headers=headers, timeout=8)
+    response.raise_for_status()
+    return response.json()
 
-def poll():
-    with lock: state['status'] = '运行中'
+
+def monitor():
     while True:
         try:
-            m = minute()
-            with lock:
-                if state['current_minute'] != m:
-                    state['current_minute']=m; state['minute_snapshots']=0; state['minute_unique_blocks']=0; state['minute_frequency']=Counter()
-            block,h=fetch_block()
-            with lock: state['minute_snapshots'] += 1; state['error']=None
-            c=calc(h)
-            if c: add(block,h,c,m)
-        except Exception as e:
-            with lock: state['error']=str(e)
+            data = fetch_block()
+            block_hash = data.get("blockID")
+            raw = data.get("block_header", {}).get("raw_data", {})
+
+            if block_hash and raw.get("number") is not None:
+                calc = calculate_hash(block_hash)
+                add_record(
+                    raw.get("number"),
+                    block_hash,
+                    calc,
+                    raw.get("timestamp")
+                )
+        except Exception as exc:
+            print("monitor error:", repr(exc), flush=True)
+
         time.sleep(POLL_SECONDS)
 
-HTML = '''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TRON 实时区块计算</title><style>
-*{box-sizing:border-box}body{margin:0;background:#f5f5f7;color:#111;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",Arial,sans-serif}.wrap{max-width:900px;margin:auto;padding:20px 14px 50px}h1{font-size:30px;margin:10px 0 8px}.sub,.meta,.small{color:#666}.card{background:#fff;border-radius:22px;padding:20px;margin:14px 0;box-shadow:0 2px 12px #0001}.label{color:#666;font-size:15px}.big{font-size:36px;font-weight:800;margin-top:5px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.box{background:#f1f1f5;border-radius:18px;padding:16px}.value{font-size:25px;font-weight:700;margin-top:5px}.hash,.small{word-break:break-all}.hash{font-family:monospace;line-height:1.45}.nums{font-size:29px;font-weight:800;line-height:1.5}.badge{display:inline-block;padding:6px 10px;border-radius:10px;background:#eee;margin:3px 5px 3px 0;font-weight:700}.parity{background:#eef5ff}.dup{background:#fff3d8}.ok{color:#138a42}.err{color:#c33}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:11px 7px;border-bottom:1px solid #eee;vertical-align:top}th{color:#666;position:sticky;top:0;background:#fff}.numline{font-weight:800;font-size:18px;line-height:1.45}.controls{display:flex;gap:8px;flex-wrap:wrap}button{border:0;border-radius:12px;padding:10px 14px;background:#eee;font-weight:700}button.active{background:#111;color:#fff}@media(max-width:650px){.nums{font-size:25px}table{font-size:13px}th:nth-child(4),td:nth-child(4){display:none}}
-</style></head><body><div class="wrap"><h1>TRON 实时区块计算</h1><div class="sub">每秒检查一次新区块；相同区块不会重复计入。历史记录包含每组号码及尾数单双。</div>
-<div class="card"><div class="label">状态</div><div id="status" class="big">加载中</div><div id="error" class="meta err"></div></div>
-<div class="grid"><div class="box"><div class="label">当前区块</div><div id="block" class="value">-</div></div><div class="box"><div class="label">本分钟快照</div><div id="snapshots" class="value">0</div></div><div class="box"><div class="label">本分钟唯一区块</div><div id="unique" class="value">0</div></div><div class="box"><div class="label">本分钟</div><div id="minute" class="value">-</div></div></div>
-<div class="card"><div class="label">最新 Hash</div><div id="hash" class="hash">-</div></div><div class="card"><div class="label">最新一组计算</div><div id="latestNums" class="nums">-</div><div id="latestParity" class="meta"></div><div id="latestMeta" class="meta"></div></div>
-<div class="card"><div class="label">本分钟号码频率（仅统计已抓取数据，不代表下一期预测）</div><div id="freq" class="meta">-</div></div>
-<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><div><div class="label">历史记录</div><div class="meta">每一组都标记尾数单双；相同的完整七号码组会显示重复次数。</div></div><div class="controls"><button id="allBtn" class="active" onclick="setFilter('all')">全部</button><button id="dupBtn" onclick="setFilter('dup')">只看重复组</button></div></div><div style="overflow:auto;margin-top:12px"><table><thead><tr><th>时间/区块</th><th>7个号码</th><th>尾数单双</th><th>重复</th><th>Hash</th></tr></thead><tbody id="history"></tbody></table></div></div></div>
-<script>let filter='all';function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]) )}function setFilter(f){filter=f;document.getElementById('allBtn').classList.toggle('active',f==='all');document.getElementById('dupBtn').classList.toggle('active',f==='dup');load()}function render(d){document.getElementById('status').innerHTML=d.status==='运行中'?'<span class="ok">运行中</span>':esc(d.status);document.getElementById('error').textContent=d.error?'错误：'+d.error:'';document.getElementById('block').textContent=d.current_block??'-';document.getElementById('snapshots').textContent=d.minute_snapshots??0;document.getElementById('unique').textContent=d.minute_unique_blocks??0;document.getElementById('minute').textContent=d.current_minute??'-';document.getElementById('hash').textContent=d.current_hash??'-';if(d.current_result){document.getElementById('latestNums').textContent=d.current_result.join('、');let p=d.current_parity;document.getElementById('latestParity').innerHTML='<span class="badge parity">尾数：'+esc(p.label)+'</span><span class="badge">单 '+p.odd+'</span><span class="badge">双 '+p.even+'</span>';document.getElementById('latestMeta').textContent='字母：'+d.current_letters+'；数字：'+d.current_digits}else{document.getElementById('latestNums').textContent='-';document.getElementById('latestParity').textContent='';document.getElementById('latestMeta').textContent=''}let f='';Object.entries(d.minute_frequency||{}).sort((a,b)=>Number(a[0])-Number(b[0])).forEach(([n,c])=>f+='<span class="badge">'+esc(n)+' × '+c+'</span>');document.getElementById('freq').innerHTML=f||'-';let rows=(d.history||[]).filter(x=>filter==='all'||x.duplicate_count>1);document.getElementById('history').innerHTML=rows.map(x=>'<tr><td>'+esc(x.time)+'<br><span class="small">区块 '+esc(x.block)+'</span></td><td><div class="numline">'+esc(x.numbers.join('、'))+'</div><span class="small">'+esc(x.minute)+'</span></td><td><span class="badge parity">'+esc(x.parity)+'</span><br><span class="small">单'+x.odd+' / 双'+x.even+'</span></td><td>'+(x.duplicate_count>1?'<span class="badge dup">第 '+x.duplicate_count+' 次</span>':'—')+'</td><td><span class="small">'+esc(x.hash)+'</span></td></tr>').join('')||'<tr><td colspan="5">暂无记录</td></tr>'}async function load(){try{let r=await fetch('/api/state',{cache:'no-store'});render(await r.json())}catch(e){document.getElementById('status').textContent='页面连接中'}}load();setInterval(load,1000);</script></body></html>'''
 
-@app.route('/')
-def index(): return render_template_string(HTML)
-@app.route('/api/state')
+PAGE = r"""
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>TRON 数据统计</title>
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;background:#f5f6fa;color:#20242b;
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC",
+  "Microsoft YaHei",Arial,sans-serif;font-size:13px
+}
+.wrap{max-width:760px;margin:0 auto;padding:5px}
+.card{
+  background:#fff;border-radius:12px;margin-bottom:6px;padding:8px;
+  box-shadow:0 2px 8px rgba(0,0,0,.045)
+}
+.current{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.item{background:#f4f5f8;border-radius:9px;padding:7px}
+.label{font-size:11px;color:#7b8190}
+.value{font-size:17px;font-weight:700;margin-top:1px;word-break:break-all}
+.numbers{font-size:22px;line-height:1.2;font-weight:800;letter-spacing:.5px}
+.badge{
+  display:inline-block;padding:3px 7px;border-radius:7px;
+  background:#eef2ff;margin:3px 3px 0 0;font-weight:700
+}
+.ai{border:1px solid #e4e7ef}
+.ai-title{font-size:16px;font-weight:800;margin-bottom:5px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}
+.stat{background:#f6f7fa;border-radius:8px;padding:6px;text-align:center}
+.stat b{font-size:15px}
+.stat span{display:block;color:#777;font-size:10px}
+.history-title{font-size:15px;font-weight:800;margin-bottom:4px}
+.table{width:100%;border-collapse:collapse;font-size:11px}
+.table th,.table td{
+  border-bottom:1px solid #eceef3;padding:5px 2px;
+  text-align:left;vertical-align:middle
+}
+.table th{color:#777;font-weight:600}
+.recnums{font-weight:700;letter-spacing:.15px;white-space:nowrap}
+.empty{text-align:center;color:#999;padding:16px}
+.note{font-size:10px;color:#888;margin-top:4px}
+.smallhash{font-size:10px;word-break:break-all;margin-top:3px;color:#333}
+@media(max-width:500px){
+  body{font-size:12px}
+  .numbers{font-size:20px}
+  .value{font-size:16px}
+  .table{font-size:10px}
+  .table th,.table td{padding:4px 1px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="card">
+  <div class="current">
+    <div class="item">
+      <div class="label">当前区块</div>
+      <div class="value" id="block">-</div>
+    </div>
+    <div class="item">
+      <div class="label">本分钟已抓取</div>
+      <div class="value" id="minuteCount">0</div>
+    </div>
+    <div class="item">
+      <div class="label">当前分钟</div>
+      <div class="value" id="minute">-</div>
+    </div>
+    <div class="item">
+      <div class="label">最新时间</div>
+      <div class="value" id="time">-</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="label">最新 Hash</div>
+  <div class="smallhash" id="hash">-</div>
+</div>
+
+<div class="card">
+  <div class="label">最新一组号码</div>
+  <div class="numbers" id="numbers">-</div>
+  <div id="latestParity"></div>
+</div>
+
+<div class="card ai">
+  <div class="ai-title">最近60期单双统计</div>
+  <div class="grid" id="summary"></div>
+
+  <div style="margin-top:6px">
+    <b>统计倾向：</b>
+    <span id="suggestion">数据不足</span>
+    <span class="badge" id="strength">-</span>
+  </div>
+
+  <div class="note">
+    统计倾向仅根据历史数据计算，不代表下一期结果，也不是投注保证。
+  </div>
+</div>
+
+<div class="card">
+  <div class="history-title">最近60期历史记录</div>
+  <div style="overflow-x:auto">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>区块</th>
+          <th>7个号码</th>
+          <th>单双</th>
+          <th>尾数</th>
+        </tr>
+      </thead>
+      <tbody id="history"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <div class="history-title">全部已抓取历史单双统计</div>
+  <div class="grid" id="allSummary"></div>
+</div>
+
+</div>
+
+<script>
+function esc(s){
+  return String(s ?? '').replace(/[&<>"']/g,m=>({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[m]));
+}
+
+function badge(text){
+  return `<span class="badge">${esc(text)}</span>`;
+}
+
+async function refresh(){
+  try{
+    const response = await fetch('/api/state',{cache:'no-store'});
+    const d = await response.json();
+    const l = d.latest || {};
+    const rows = d.history || [];
+
+    document.getElementById('block').textContent = l.block ?? '-';
+    document.getElementById('minute').textContent = l.minute ?? '-';
+    document.getElementById('time').textContent =
+      l.updated ? new Date(l.updated).toLocaleTimeString() : '-';
+    document.getElementById('hash').textContent = l.hash ?? '-';
+
+    document.getElementById('numbers').textContent =
+      (l.numbers || []).map(x=>String(x).padStart(2,'0')).join('、') || '-';
+
+    if(l.numbers){
+      document.getElementById('latestParity').innerHTML =
+        badge(`${l.odd}单${l.even}双`) +
+        badge(`尾${l.tail_odd}单${l.tail_even}双`);
+    }else{
+      document.getElementById('latestParity').innerHTML = '';
+    }
+
+    const minuteCount = rows.filter(x=>x.minute === l.minute).length;
+    document.getElementById('minuteCount').textContent = minuteCount;
+
+    // 最近60期组合统计
+    const counts = {};
+    rows.slice(0,60).forEach(x=>{
+      const k = `${x.odd}单${x.even}双`;
+      counts[k] = (counts[k] || 0) + 1;
+    });
+
+    const entries = Object.entries(counts)
+      .sort((a,b)=>b[1]-a[1]);
+
+    document.getElementById('summary').innerHTML =
+      entries.slice(0,6).map(([k,v])=>
+        `<div class="stat"><b>${esc(k)}</b><span>${v}期</span></div>`
+      ).join('') || '<div class="empty">暂无数据</div>';
+
+    if(entries.length){
+      document.getElementById('suggestion').textContent = entries[0][0];
+      let strength = '弱';
+      if(entries[0][1] >= 20) strength = '较强';
+      else if(entries[0][1] >= 14) strength = '中';
+      document.getElementById('strength').textContent = strength;
+    }else{
+      document.getElementById('suggestion').textContent = '数据不足';
+      document.getElementById('strength').textContent = '-';
+    }
+
+    // 全部已抓取历史统计
+    const all = {};
+    rows.forEach(x=>{
+      const k = `${x.odd}单${x.even}双`;
+      all[k] = (all[k] || 0) + 1;
+    });
+
+    const allEntries = Object.entries(all)
+      .sort((a,b)=>b[1]-a[1]);
+
+    document.getElementById('allSummary').innerHTML =
+      allEntries.slice(0,9).map(([k,v])=>
+        `<div class="stat"><b>${esc(k)}</b><span>${v}期</span></div>`
+      ).join('') || '<div class="empty">暂无数据</div>';
+
+    document.getElementById('history').innerHTML =
+      rows.slice(0,60).map(x=>{
+        const nums = (x.numbers || [])
+          .map(n=>String(n).padStart(2,'0')).join(' ');
+
+        return `<tr>
+          <td>${esc(x.time)}</td>
+          <td>${esc(x.block)}</td>
+          <td class="recnums">${esc(nums)}</td>
+          <td>${esc(x.odd)}单${esc(x.even)}双</td>
+          <td>${esc(x.tail_odd)}单${esc(x.tail_even)}双</td>
+        </tr>`;
+      }).join('') ||
+      '<tr><td colspan="5" class="empty">等待新区块数据...</td></tr>';
+
+  }catch(e){}
+}
+
+refresh();
+setInterval(refresh,1000);
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/")
+def index():
+    return render_template_string(PAGE)
+
+
+@app.get("/api/state")
 def api_state():
-    with lock:
-        d=dict(state); d['minute_frequency']=dict(state['minute_frequency']); d['history']=list(state['history']); d['current_parity']=parity(state['current_result']) if state['current_result'] else None
-    return jsonify(d)
+    with state_lock:
+        return jsonify({
+            "latest": dict(latest),
+            "history": list(history),
+            "history_count": len(history)
+        })
 
-if __name__ == '__main__':
-    threading.Thread(target=poll, daemon=True).start()
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT','10000')), debug=False)
+
+if __name__ == "__main__":
+    threading.Thread(target=monitor, daemon=True).start()
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)

@@ -1,49 +1,28 @@
+# TRON 实时区块统计页面 v2
 
-# TRON 实时区块计算网页
+功能：
+- 每秒检查 TRON 新区块
+- 按既定规则计算 7 个号码
+- 保存当前运行实例中的历史记录
+- 每组精确统计 7 个号码的单双
+- 另外统计 7 个号码个位“尾数”的单双
+- 最近 60 期单双组合统计
+- 全部已抓取历史单双组合统计
+- 手机紧凑布局，一屏查看核心数据
+- 统计倾向只作为历史数据参考，不保证下一期结果
 
-这个项目用于：
-- 每秒检查 TRON 主网最新区块；
-- 发现新区块后读取 blockID/hash；
-- 按你之前保存的规则提取 7 个 A-E 字母和 7 个数字并计算；
-- 手机浏览器打开网页查看；
-- 每分钟重置一次统计；
-- 统计本分钟已经抓到的“唯一区块”号码频率。
-
-注意：
-1. 每秒检查并不等于每秒都有新区块。TRON 区块产生速度不是 1 秒 1 个，因此“59 秒快照”和“59 个唯一区块”是两回事。
-2. 程序只做链上数据抓取和历史统计，不保证、也不声称能够预测博彩开奖结果。
-3. 生产环境建议使用 TronGrid API key，并遵守当前配额/限流规则。
-
-## 本地运行
-Python 3.11+：
-
-```bash
-python -m venv .venv
-# macOS/Linux:
-source .venv/bin/activate
-# Windows:
-# .venv\Scripts\activate
-
+Render：
+Build Command:
 pip install -r requirements.txt
-export TRON_PRO_API_KEY="你的API_KEY"
-python app.py
-```
 
-然后手机和电脑在同一局域网时，可在电脑上查看局域网地址，或部署到云服务器后用 HTTPS 网页访问。
-
-## 云服务器部署
-建议部署到支持 Python Web 服务的平台。启动命令：
-
-```bash
+Start Command:
 gunicorn app:app --bind 0.0.0.0:$PORT
-```
 
 环境变量：
-- `TRON_PRO_API_KEY`：你的 TronGrid API key
-- `POLL_SECONDS`：默认 1
-- `TRONGRID_URL`：默认 https://api.trongrid.io/wallet/getnowblock
+TRON_PRO_API_KEY = 你的 TronGrid API Key
+POLL_SECONDS = 1
+HISTORY_LIMIT = 5000
 
-## 手机
-部署完成后，iPhone 用 Safari 打开服务器网址即可；可选择“添加到主屏幕”。
-
-不要把 TronGrid API key 写进网页前端代码；应放在服务器环境变量中。
+注意：
+当前版本历史记录保存在服务运行内存中。Render 服务重启/重新部署后，内存历史会清空。
+如果需要真正“永久保存全部历史”，下一版应接数据库（例如 PostgreSQL），这样重启也不会丢记录。
