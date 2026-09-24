@@ -1141,6 +1141,10 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
                     INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size,conclusion17,conclusion17_mode)
                     VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT(period_key) DO UPDATE SET
+                      data_conclusion=COALESCE(ai_predictions.data_conclusion,EXCLUDED.data_conclusion),
+                      ai_analysis=COALESCE(ai_predictions.ai_analysis,EXCLUDED.ai_analysis),
+                      prediction_top3=COALESCE(ai_predictions.prediction_top3,EXCLUDED.prediction_top3),
+                      sample_size=GREATEST(COALESCE(ai_predictions.sample_size,0),EXCLUDED.sample_size),
                       conclusion17=COALESCE(ai_predictions.conclusion17,EXCLUDED.conclusion17),
                       conclusion17_mode=COALESCE(ai_predictions.conclusion17_mode,EXCLUDED.conclusion17_mode)
                 """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3),int(stats.get('sampleSize') or 0),
@@ -1527,50 +1531,61 @@ def threshold_gap_stats(rows):
 
 @app.get('/api/history-summary')
 def history_summary():
-    """Period-level history for the History tab, selectable up to 5000 periods."""
-    allowed_limits = {30, 50, 100, 500, 1000, 5000}
-    try:
-        requested_limit = int(request.args.get('limit', 30))
-    except Exception:
-        requested_limit = 100
-    history_limit = requested_limit if requested_limit in allowed_limits else 30
-    conn=db_connect()
-    if conn is None:
-        return jsonify({'ok':False,'error':'database unavailable'}),503
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""SELECT p.period_date,p.period_no,p.target_block,p.data_conclusion,p.ai_analysis,
-                          p.prediction_top3,p.actual_single,p.created_at,p.verified_at,p.conclusion17,p.conclusion17_mode,b.numbers,b.single_count
-                          FROM ai_predictions p LEFT JOIN tron_blocks b ON b.block_number=p.target_block
-                          ORDER BY p.period_date DESC,p.period_no DESC LIMIT %s""", (history_limit,))
-            rows=cur.fetchall()
-            cur.execute("""SELECT period_date,period_no,actual_single FROM ai_predictions
-                          WHERE actual_single IS NOT NULL
-                          ORDER BY period_date DESC,period_no DESC LIMIT 5000""")
-            gap_rows=cur.fetchall()
-        gap_stats=threshold_gap_stats(gap_rows)
+    """Official history/gaps are based on confirmed group-20 blocks; AI rows are optional metadata."""
+    allowed_limits={30,50,100,500,1000,5000}
+    try: requested_limit=int(request.args.get('limit',30))
+    except Exception: requested_limit=30
+    history_limit=requested_limit if requested_limit in allowed_limits else 30
+    date_str,period,_,_=current_period(); idx_now=period_index(date_str,period)
+    def period_targets(n):
         out=[]
-        for r in rows:
-            top=r.get('prediction_top3') or []
-            if isinstance(top,str):
-                try: top=json.loads(top)
-                except Exception: top=[]
-            nums=r.get('numbers') or []
-            if isinstance(nums,str):
-                try: nums=json.loads(nums)
-                except Exception: nums=[]
-            actual=r.get('actual_single')
-            hit=bool(actual is not None and int(actual) in [int(x) for x in top])
-            out.append({'date':r['period_date'].isoformat() if r.get('period_date') else None,
-                        'period':int(r['period_no']),'targetBlock':int(r['target_block']),
-                        'dataConclusion':r.get('data_conclusion'),'aiAnalysis':r.get('ai_analysis'),'conclusion17':r.get('conclusion17'),'conclusion17Mode':r.get('conclusion17_mode'),
-                        'top3':[int(x) for x in top][:3],'actualSingle':int(actual) if actual is not None else None,
-                        'numbers':nums,'hit':hit,'verified':actual is not None})
-        date_str, period, _, _ = current_period()
-        patterns=pattern_insights(date_str,period,1000)
-        return jsonify({'ok':True,'rows':out,'patterns':patterns,'gapStats':gap_stats,'historyLimit':history_limit,'historyMax':5000})
-    finally:
-        db_release(conn)
+        for off in range(1,n+1):
+            idx=idx_now-off; ordinal,zero=divmod(idx,1440); d=date.fromordinal(ordinal); pno=zero+1
+            ds=d.strftime('%Y-%m-%d'); out.append((ds,pno,period_target_block(ds,pno)))
+        return out
+    periods=period_targets(history_limit); gap_periods=period_targets(5000)
+    try: block_map=get_db_blocks(list(dict.fromkeys([x[2] for x in gap_periods])))
+    except Exception: block_map={}
+    pred_by_key={}; conn=db_connect()
+    if conn is not None:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""SELECT period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,
+                              prediction_top3,actual_single,created_at,verified_at,conclusion17,conclusion17_mode
+                              FROM ai_predictions ORDER BY period_date DESC,period_no DESC LIMIT 5000""")
+                for pr in cur.fetchall(): pred_by_key[str(pr.get('period_key') or '')]=pr
+        finally: db_release(conn)
+    out=[]
+    for ds,pno,target in periods:
+        br=block_map.get(target); pr=pred_by_key.get(f'{ds}:{pno:04d}')
+        if not br and not pr: continue
+        top=(pr or {}).get('prediction_top3') or []
+        if isinstance(top,str):
+            try: top=json.loads(top)
+            except Exception: top=[]
+        nums=(br or {}).get('numbers') or []
+        if isinstance(nums,str):
+            try: nums=json.loads(nums)
+            except Exception: nums=[]
+        official_single=int(br['single_count']) if br and br.get('single_count') is not None else None
+        stored=(pr or {}).get('actual_single')
+        actual=official_single if official_single is not None else (int(stored) if stored is not None else None)
+        top=[int(x) for x in top][:3]
+        out.append({'date':ds,'period':pno,'targetBlock':int(target),'dataConclusion':(pr or {}).get('data_conclusion'),
+                    'aiAnalysis':(pr or {}).get('ai_analysis'),'conclusion17':(pr or {}).get('conclusion17'),
+                    'conclusion17Mode':(pr or {}).get('conclusion17_mode'),'top3':top,'actualSingle':actual,'numbers':nums,
+                    'hit':bool(actual is not None and actual in top),'verified':bool(pr and actual is not None),
+                    'predictionSaved':bool(pr),'officialSaved':bool(br)})
+    gap_rows=[]
+    for ds,pno,target in gap_periods:
+        br=block_map.get(target)
+        if br and br.get('single_count') is not None:
+            gap_rows.append({'period_date':date.fromisoformat(ds),'period_no':pno,'actual_single':int(br['single_count'])})
+    gap_stats=threshold_gap_stats(gap_rows)
+    patterns=pattern_insights(date_str,period,1000)
+    return jsonify({'ok':True,'rows':out,'patterns':patterns,'gapStats':gap_stats,'historyLimit':history_limit,
+                    'historyMax':5000,'officialCount':sum(1 for x in out if x['officialSaved']),
+                    'predictionCount':sum(1 for x in out if x['predictionSaved'])})
 
 
 @app.get('/api/history')

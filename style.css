@@ -151,3 +151,6 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
   .result-box{min-width:0}
   .ai-home-card .conclusion,.ai-home-card .ai-result-box,.ai-home-card .ai-predict-line,.ai-home-card .ai-relation-line{overflow-wrap:anywhere}
 }
+
+.draw-history-table{min-width:0!important;table-layout:fixed}.draw-history-table .nums-cell{white-space:normal!important;line-height:1.45;letter-spacing:0!important}
+@media(max-width:520px){#historyDraws.history-table-box{overflow-x:hidden}#historyDraws .draw-history-table{width:100%;min-width:0!important;font-size:10px}#historyDraws .draw-history-table th,#historyDraws .draw-history-table td{padding:7px 2px}#historyDraws .draw-history-table .block-col{display:none}#historyDraws .draw-history-table th:nth-child(1),#historyDraws .draw-history-table td:nth-child(1){width:25%}#historyDraws .draw-history-table th:nth-child(2),#historyDraws .draw-history-table td:nth-child(2){width:18%}#historyDraws .draw-history-table th:nth-child(3),#historyDraws .draw-history-table td:nth-child(3){width:57%}}

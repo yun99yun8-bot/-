@@ -116,17 +116,17 @@
     var lim=historyLimitSelect?historyLimitSelect.value:'30';
     var x=new XMLHttpRequest(); x.open('GET','/api/history-summary?limit='+encodeURIComponent(lim)+'&t='+Date.now(),true);
     x.timeout=10000;
-    x.onreadystatechange=function(){if(x.readyState!==4)return;historyBusy=false;if(x.status<200||x.status>=300){text('historyModel','历史数据暂时不可用，保留当前页面数据并自动重试');return;}try{var d=JSON.parse(x.responseText);if(!d.ok){text('historyModel','历史数据暂时不可用，稍后自动重试');return;}renderHistoryPage(d.rows||[],d.patterns||null,d.gapStats||null);text('historyLimitStatus','已读取 '+(d.rows||[]).length+' / '+Number(d.historyLimit||lim)+' 期 · 最多5000期');}catch(e){text('historyModel','历史数据解析失败，稍后自动重试');}};
+    x.onreadystatechange=function(){if(x.readyState!==4)return;historyBusy=false;if(x.status<200||x.status>=300){text('historyModel','历史数据暂时不可用，保留当前页面数据并自动重试');return;}try{var d=JSON.parse(x.responseText);if(!d.ok){text('historyModel','历史数据暂时不可用，稍后自动重试');return;}renderHistoryPage(d.rows||[],d.patterns||null,d.gapStats||null);text('historyLimitStatus','正式开奖 '+Number(d.officialCount||0)+' 期 · AI记录 '+Number(d.predictionCount||0)+' 期 · 最多5000期');}catch(e){text('historyModel','历史数据解析失败，稍后自动重试');}};
     x.onerror=function(){historyBusy=false;text('historyModel','历史数据连接暂时中断，稍后自动重试');}; x.ontimeout=x.onerror; x.send(null);
   }
   function renderHistoryPage(rows,patterns,gapStats){
     var verified=rows.filter(function(r){return r.verified;}); var hits=verified.filter(function(r){return r.hit;}).length;
     text('historyModel','历史AI前三验证：'+hits+'/'+verified.length+(verified.length?'（'+(hits/verified.length*100).toFixed(2)+'%）':'')+'；仅统计开奖前已保存的预测。');
-    var dh='<table class="group-table history-table"><thead><tr><th>期号</th><th>正式单数</th><th>7个号码</th><th>区块</th></tr></thead><tbody>';
+    var dh='<table class="group-table history-table draw-history-table"><thead><tr><th>期号</th><th>开奖</th><th>7个号码</th><th class="block-col">区块</th></tr></thead><tbody>';
     var ph='<table class="group-table history-table"><thead><tr><th>期号</th><th>17组结论</th><th>10秒AI</th><th>AI前三</th><th>实际</th><th>验证</th></tr></thead><tbody>';
     for(var i=0;i<rows.length;i++){var r=rows[i],p=String(r.period).padStart(4,'0');
-      if(r.verified)dh+='<tr><td>'+p+'</td><td>单'+r.actualSingle+'</td><td>'+((r.numbers||[]).join(' ')||'--')+'</td><td>'+r.targetBlock+'</td></tr>';
-      ph+='<tr><td>'+p+'</td><td>'+(r.conclusion17!=null?('单'+r.conclusion17+(r.conclusion17Mode?' · '+r.conclusion17Mode:'')):'--')+'</td><td>'+(r.aiAnalysis!=null?'单'+r.aiAnalysis:'--')+'</td><td>'+((r.top3||[]).map(function(v){return '单'+v;}).join(' / ')||'--')+'</td><td>'+(r.actualSingle!=null?'单'+r.actualSingle:'待开奖')+'</td><td>'+(r.verified?(r.hit?'✓ 对':'✕ 错'):'待验证')+'</td></tr>';
+      if(r.officialSaved)dh+='<tr><td><b>'+p+'</b></td><td><b>单'+r.actualSingle+'</b></td><td class="nums-cell">'+((r.numbers||[]).join(' ')||'--')+'</td><td class="block-col">'+r.targetBlock+'</td></tr>';
+      if(r.predictionSaved)ph+='<tr><td>'+p+'</td><td>'+(r.conclusion17!=null?('单'+r.conclusion17):'--')+'</td><td>'+(r.aiAnalysis!=null?'单'+r.aiAnalysis:'--')+'</td><td>'+((r.top3||[]).map(function(v){return '单'+v;}).join(' / ')||'--')+'</td><td>'+(r.actualSingle!=null?'单'+r.actualSingle:'待开奖')+'</td><td>'+(r.actualSingle!=null?(r.hit?'✓ 对':'✕ 错'):'待验证')+'</td></tr>';
     }
     if(!rows.length){dh+='<tr><td colspan="4">暂无历史开奖记录</td></tr>';ph+='<tr><td colspan="6">暂无历史AI记录</td></tr>';} dh+='</tbody></table>'; ph+='</tbody></table>';
     document.getElementById('historyDraws').innerHTML=dh; document.getElementById('historyPredictions').innerHTML=ph;
