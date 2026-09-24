@@ -309,18 +309,21 @@ def save_record(period, idx, block, block_hash, calc, ts):
 
 
 def king_prediction(day, idx, period, rows):
+    # 第17组完成后，用当前期前17组的“单几”频率统计来确定第20组统计倾向。
+    # 规则：单0～单6分别统计出现次数，出现次数最多者作为统计结论。
     if len(rows)<17: return None
     with lock:
         c=db(); existing=c.execute("SELECT prediction FROM king_predictions WHERE day=? AND period_index=?",(day,idx)).fetchone()
         if existing and existing["prediction"]: c.close(); return existing["prediction"]
-    counts=Counter(f"单{r['odd']}" for r in rows[:17])
-    if not counts: return None
-    mx=max(counts.values()); candidates=[k for k,v in counts.items() if v==mx]
-    pred=candidates[0]
-    if len(candidates)>1:
-        for r in reversed(rows[:17]):
-            k=f"单{r['odd']}"
-            if k in candidates: pred=k; break
+    counts={i:0 for i in range(7)}
+    for r in rows[:17]:
+        odd=int(r["odd"])
+        if 0 <= odd <= 7:
+            counts[odd]+=1
+    mx=max(counts.values())
+    if mx <= 0: return None
+    # 同频时不人为制造概率差异：保留最先出现的并列最大值。
+    pred=f"单{next(i for i in range(7) if counts[i]==mx)}"
     with lock:
         c=db(); c.execute("""INSERT OR IGNORE INTO king_predictions(day,period_index,period,prediction,predicted_at)
              VALUES(?,?,?,?,?)""",(day,idx,period,pred,datetime.now(timezone.utc).isoformat())); c.commit(); c.close()
@@ -509,13 +512,13 @@ th{background:#f5f6f8;font-weight:800}
 <div class="label" id="cycleLabel">当前20组状态</div>
 <div class="status" id="status">等待中</div>
 
-<div class="label">第17组统计预判第20组</div>
+<div class="label">经统计结论为</div>
 <div class="status" id="pred">等待第17组</div>
 
-<div class="label">第20组实际开奖结果</div>
+<div class="label">实际结果</div>
 <div class="status" id="actual">等待第20组</div>
 
-<div class="label">第20组出的7个号码</div>
+<div class="label" id="resultLabel">平台对应期号开奖结果</div>
 <div class="nums" id="nums">-</div>
 <div id="parity"></div>
 <div class="hash" id="hash"></div>
@@ -603,8 +606,9 @@ async function refresh(){
 
   document.getElementById('cycleLabel').textContent=d.day+'｜当前期：'+d.display_period+'｜20组进度：'+d.progress+'/20';
 
-  document.getElementById('pred').textContent=d.prediction ? ('预判期：'+d.display_period+'期｜'+d.prediction) : '等待17/20预判';
-  document.getElementById('actual').textContent=d.actual ? ('开奖期：'+d.display_period+'期｜第20组：'+d.actual) : '等待20/20开奖';
+  document.getElementById('pred').textContent=d.prediction ? d.prediction : '等待17/20统计';
+  document.getElementById('actual').textContent=d.actual ? (d.display_period+'期｜'+d.actual) : '等待20/20开奖';
+  document.getElementById('resultLabel').textContent=d.actual ? ('平台'+d.display_period+'期开奖结果') : '平台对应期号开奖结果';
   document.getElementById('status').textContent=d.actual?'已开奖':'等待中';
 
   const actualNums=d.actual_numbers||[];
