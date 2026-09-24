@@ -840,7 +840,7 @@ def group20_relation_model(date_str, period, lookback=120):
         _relation_cache.update({'key':cache_key,'at':now,'value':value})
     return value
 
-def ai_analysis_from_data(groups, historical, relation=None):
+def ai_analysis_from_data(groups, historical, relation=None, max_group=19):
     """Adaptive 8-class scoring model.
 
     Every class 单0..单7 is scored independently.  The model combines:
@@ -853,7 +853,7 @@ def ai_analysis_from_data(groups, historical, relation=None):
     The returned percentages are normalized *model scores*, not guaranteed
     probabilities.  No class is artificially promoted merely for variety.
     """
-    current = [int(groups[str(i)]['singleCount']) for i in range(1, 20)
+    current = [int(groups[str(i)]['singleCount']) for i in range(1, int(max_group)+1)
                if str(i) in groups and groups[str(i)].get('singleCount') is not None]
     if not current:
         return None, {}
@@ -901,7 +901,7 @@ def ai_analysis_from_data(groups, historical, relation=None):
     if relation and relation.get('positions'):
         votes = [1.0] * 8
         weight_total = 8.0
-        for g in range(1,20):
+        for g in range(1,int(max_group)+1):
             row = groups.get(str(g))
             st = relation['positions'].get(g) if isinstance(relation.get('positions'), dict) else None
             if not row or not st or row.get('singleCount') is None:
@@ -941,6 +941,28 @@ def ai_analysis_from_data(groups, historical, relation=None):
     pick = ranked[0]
     return pick, {str(i): round(scores[i], 2) for i in range(8)}
 
+def ai17_conclusion_from_data(groups, historical, relation=None):
+    """Independent 17-group AI conclusion.
+
+    Uses only groups 1..17 from the current round.  It deliberately compares
+    current high/middle/low-frequency classes with historical, omission,
+    transition and fixed-position signals instead of blindly selecting the
+    most frequent current class.  Scores are model scores, not guaranteed odds.
+    """
+    sample=[int(groups[str(i)]['singleCount']) for i in range(1,18)
+            if str(i) in groups and groups[str(i)].get('singleCount') is not None]
+    if len(sample) < 17:
+        return None
+    pick, scores = ai_analysis_from_data(groups, historical, relation, max_group=17)
+    if pick is None:
+        return None
+    counts={i:sample.count(i) for i in range(8)}
+    ordered=sorted(counts, key=lambda i:(counts[i],i))
+    low=set(ordered[:3]); high=set(ordered[-3:]); mid=set(range(8))-low-high
+    bucket='高频' if pick in high else ('低频' if pick in low else '居中')
+    return {'single':int(pick),'scores':scores,'sampleSize':17,'bucket':bucket,'frozen':True}
+
+
 def calibrated_countdown_value():
     """Countdown on the same Beijing-4s clock used by current_period/UI."""
     now = datetime.now(CN_TZ) - timedelta(seconds=4)
@@ -967,9 +989,8 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
     ai, scores=ai_analysis_from_data(groups,historical,relation)
     if ai is None: return None
     ranked_top3 = sorted(range(8), key=lambda i: (-float(scores.get(str(i), 0)), i))[:3]
-    highest=stats.get('highest') or []
-    # A tied data conclusion is not forced into a false single choice.
-    data_conclusion=int(highest[0]['single']) if len(highest)==1 else None
+    conclusion17=ai17_conclusion_from_data(groups,historical,relation)
+    data_conclusion=int(conclusion17['single']) if conclusion17 else None
     key=f'{date_str}:{int(period):04d}'
     conn=db_connect()
     if conn is None: return None
@@ -1028,6 +1049,10 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
     historical=get_historical_official_singles(date_str,period)
     relation=group20_relation_model(date_str, period)
     live_ai,scores=ai_analysis_from_data(groups,historical,relation)
+    conclusion17=ai17_conclusion_from_data(groups,historical,relation)
+    if row and row.get('data_conclusion') is not None:
+        if conclusion17 is None: conclusion17={'single':int(row['data_conclusion']),'scores':{},'sampleSize':17,'bucket':'已锁定','frozen':True}
+        else: conclusion17['single']=int(row['data_conclusion'])
     ai_single=int(row['ai_analysis']) if row else live_ai
     frozen_top3=[]
     if row and row.get('prediction_top3') is not None:
@@ -1061,7 +1086,7 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
             'top3Hits':top3_hits,'top3HitRate':round(top3_hits/verified*100,2) if verified else None,'latestVerified':latest_result,
             'hitRate':round(hits/verified*100,2) if verified else None,
             'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,
-            'sameAsGroup20':matches,'relationTop3':(relation.get('ranking') or [])[:3],'relationSample':relation.get('samplePeriods',0)}
+            'conclusion17':conclusion17,'sameAsGroup20':matches,'relationTop3':(relation.get('ranking') or [])[:3],'relationSample':relation.get('samplePeriods',0)}
     with _ai_summary_cache_lock:
         _ai_summary_cache.update({'key':key,'at':time.time(),'value':dict(result)})
     return result

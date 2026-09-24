@@ -27,7 +27,7 @@
           <div class="prob-item" data-prob-single="1">单1<small>次数：--次</small><small>概率：--%</small></div>
           <div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
         </div>
-        <div class="conclusion" id="statsConclusion">数据结论：等待第1～18组数据</div>
+        <div class="conclusion" id="statsConclusion">AI结论：等待前17组数据</div>
         <div class="conclusion" id="aiAnalysisLine">AI分析：正在分析中…</div>
         <div class="ai-panel">
           <div class="ai-result-box" id="aiVerifyResult">预测验证：等待已开奖预测</div>
@@ -155,11 +155,11 @@
       if(sm[0])sm[0].textContent='次数：'+row.count+'次';
       if(sm[1])sm[1].textContent='概率：'+Number(row.probability||0).toFixed(2)+'%';
     }
-    var sample=Number(ds.sampleSize||0), highest=Array.isArray(ds.highest)?ds.highest:[], names=[];
-    for(var j=0;j<highest.length;j++)names.push('单'+highest[j].single);
-    if(highest.length){ text('statsConclusion','数据结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）'); }
-    else if(!lastGoodStats){ text('statsConclusion','数据结论：等待第1～18组数据'); }
+    var sample=Number(ds.sampleSize||0);
     var incomingAI=data.aiAnalysis||{};
+    var c17=incomingAI.conclusion17||{};
+    if(c17.single===0||c17.single){ text('statsConclusion','AI结论：单'+c17.single+'　｜　17组模型　｜　'+(c17.bucket||'综合')+'倾向　｜　已锁定'); }
+    else { text('statsConclusion','AI结论：正在分析前17组数据…（'+Math.min(sample,17)+'/17）'); }
     var incomingScores=incomingAI.scores||{};
     var incomingValid=(incomingAI.single===0||!!incomingAI.single||Object.keys(incomingScores).length>0||Array.isArray(incomingAI.top3)&&incomingAI.top3.length>0);
     if(incomingValid){ lastGoodAI=incomingAI; }
