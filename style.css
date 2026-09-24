@@ -49,3 +49,10 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .single-badge strong{font-size:16px;margin-left:1px}
 .period-badge{text-align:center}
 @media(max-width:360px){.draw-meta{gap:4px}.single-badge{font-size:11px;padding:6px 7px}.single-badge strong{font-size:14px}.period-badge{font-size:10px;padding:6px 6px}.period-badge strong{font-size:12px}}
+
+.stats-note{font-size:11px;color:#8a95a6;margin:-3px 0 7px;text-align:right}
+.group-table-wrap{overflow:auto;border-radius:8px;border:1px solid #dce6f2}
+.group-table{width:100%;border-collapse:collapse;font-size:11px;min-width:420px}
+.group-table th,.group-table td{padding:7px 5px;border-bottom:1px solid #e5ebf3;text-align:center;white-space:nowrap}
+.group-table th{background:#f3f7fc;color:#53657d;font-weight:800}
+.group-table td:nth-child(4){text-align:left;letter-spacing:.5px}

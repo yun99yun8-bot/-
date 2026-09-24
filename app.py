@@ -93,6 +93,82 @@ def calc_numbers(block_hash):
     return result
 
 
+
+def calc_single_count(numbers):
+    return sum(int(n) % 2 for n in numbers)
+
+
+def period_target_block(date_str, period):
+    """Return the platform's group-20/result block for a period.
+    Confirmed anchor: 2026-09-24 period 0481 -> TRON block 86511906;
+    each following platform period advances exactly 20 blocks.
+    """
+    if date_str == '2026-09-24':
+        return 86511906 + (int(period) - 481) * 20
+    # For dates without a supplied calibration, retain the existing state anchor.
+    return None
+
+
+def collect_period_groups(date_str, period, latest_number, state):
+    """Collect the 20 block positions inside the current platform period.
+    Group 20 is the official result block. Groups 1-18 feed the statistics;
+    groups 18-19 are also retained in the period record as requested.
+    """
+    target20 = period_target_block(date_str, period)
+    if target20 is None:
+        if state and state.get('date') == date_str and state.get('period') == f'{int(period):04d}' and state.get('blockNumber') is not None:
+            target20 = int(state['blockNumber'])
+        else:
+            return {}, None
+
+    groups = (state or {}).get('groups', {}) if state else {}
+    if not isinstance(groups, dict):
+        groups = {}
+    groups = {str(k): v for k, v in groups.items() if isinstance(v, dict)}
+
+    # A group is the corresponding consecutive TRON block; group 20 is target20.
+    for group_no in range(1, 20):
+        block_number = target20 - (20 - group_no)
+        if block_number > latest_number:
+            continue
+        key = str(group_no)
+        if key in groups and groups[key].get('blockNumber') == block_number and groups[key].get('numbers'):
+            continue
+        try:
+            block = fetch_block_by_number(block_number)
+            nums = calc_numbers(block['block'])
+            groups[key] = {
+                'group': group_no,
+                'blockNumber': block_number,
+                'block': block['block'],
+                'numbers': [f'{n:02d}' for n in nums],
+                'singleCount': calc_single_count(nums)
+            }
+        except Exception:
+            # Leave an unavailable group unfilled; later polling can retry it.
+            continue
+
+    return groups, target20
+
+
+def stats_from_groups(groups):
+    """Statistics are based only on groups 1-18."""
+    counts = {str(i): 0 for i in range(8)}
+    used = 0
+    for group_no in range(1, 19):
+        row = groups.get(str(group_no))
+        if row and row.get('singleCount') is not None:
+            counts[str(int(row['singleCount']))] += 1
+            used += 1
+    stats = []
+    for i in range(8):
+        c = counts[str(i)]
+        stats.append({'single': i, 'count': c, 'probability': round(c / used * 100, 2) if used else 0})
+    max_count = max((x['count'] for x in stats), default=0)
+    highest = [x for x in stats if x['count'] == max_count] if used else []
+    return {'sampleSize': used, 'stats': stats, 'highest': highest}
+
+
 def read_state():
     try:
         if STATE_FILE.exists():
@@ -106,20 +182,6 @@ def write_state(data):
     tmp = STATE_FILE.with_suffix('.tmp')
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
     tmp.replace(STATE_FILE)
-
-
-def update_omission(previous, single_count):
-    """After each newly confirmed period: the observed single-count resets to 0;
-    every other single-count omission increases by 1. Values are persisted in state.
-    """
-    current = {}
-    if isinstance(previous, dict):
-        current = {str(i): int(previous.get(str(i), 0)) for i in range(8)}
-    else:
-        current = {str(i): 0 for i in range(8)}
-    for i in range(8):
-        current[str(i)] = 0 if i == int(single_count) else current[str(i)] + 1
-    return current
 
 
 def target_block_number(date_str, period, state, latest_number):
@@ -165,43 +227,83 @@ def style():
 @app.get('/api/draw')
 def draw():
     date_str, period, period_str, platform_period = current_period()
-    state = read_state()
-
-    # Same platform period: never recalculate or replace its published result.
-    if state and state.get('date') == date_str and state.get('period') == period_str and state.get('numbers'):
-        return jsonify({**state, 'platformPeriod': platform_period, 'singleCount': sum(int(n) % 2 for n in state['numbers']), 'omission': state.get('omission', {str(i): 0 for i in range(8)}), 'ok': True, 'isNew': False})
+    state = read_state() or {}
 
     try:
         latest = fetch_latest_block()
-        target_number = target_block_number(date_str, period, state, latest['number'])
+        groups, target20 = collect_period_groups(date_str, period, latest['number'], state)
 
-        # The result block has not been produced yet. Keep the previous period's
-        # result visible instead of clearing the screen.
-        if target_number > latest['number']:
-            if state and state.get('numbers'):
-                return jsonify({**state, 'platformPeriod': platform_period, 'omission': state.get('omission', {str(i): 0 for i in range(8)}), 'waitingForNewResult': True, 'ok': True, 'isNew': False})
-            return jsonify({'ok': False, 'waitingForNewResult': True, 'error': '等待对应开奖区块'})
+        # Official result = group 20. Do not publish it until its target block exists.
+        official = None
+        if target20 is not None and target20 <= latest['number']:
+            key20 = '20'
+            if key20 in groups and groups[key20].get('blockNumber') == target20:
+                official = groups[key20]
+            else:
+                try:
+                    block20 = fetch_block_by_number(target20)
+                    nums20 = calc_numbers(block20['block'])
+                    official = {
+                        'group': 20,
+                        'blockNumber': target20,
+                        'block': block20['block'],
+                        'numbers': [f'{n:02d}' for n in nums20],
+                        'singleCount': calc_single_count(nums20)
+                    }
+                    groups[key20] = official
+                except Exception:
+                    official = None
 
-        target = fetch_block_by_number(target_number)
-        numbers = calc_numbers(target['block'])
-        single_count = sum(n % 2 for n in numbers)
-        omission = update_omission(state.get('omission') if state else None, single_count)
-        new_state = {
-            'date': date_str,
-            'period': period_str,
+        # Preserve the last confirmed official result until the next one exists.
+        if official:
+            state = {
+                'date': date_str,
+                'period': period_str,
+                'platformPeriod': platform_period,
+                'block': official['block'],
+                'blockNumber': official['blockNumber'],
+                'numbers': official['numbers'],
+                'singleCount': official['singleCount'],
+                'groups': groups,
+                'source': 'TRONGrid / getblockbynum'
+            }
+            write_state(state)
+        else:
+            # Keep same-period group cache even when group 20 is not ready.
+            state.update({'date': date_str, 'period': period_str, 'platformPeriod': platform_period, 'groups': groups})
+            write_state(state)
+
+        # If there is no current official result, return the prior published result
+        # fields while still exposing current-period statistics when available.
+        current_stats = stats_from_groups(groups)
+        response = {
+            **state,
             'platformPeriod': platform_period,
-            'block': target['block'],
-            'blockNumber': target_number,
-            'numbers': [f'{n:02d}' for n in numbers],
-            'singleCount': single_count,
-            'omission': omission,
-            'source': 'TRONGrid / getblockbynum'
+            'currentPeriod': period_str,
+            'targetResultBlock': target20,
+            'officialReady': bool(official),
+            'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
+            'dataStats': current_stats,
+            'ok': True,
+            'isNew': bool(official)
         }
-        write_state(new_state)
-        return jsonify({**new_state, 'ok': True, 'isNew': True})
+        if not official and not state.get('numbers'):
+            response['waitingForNewResult'] = True
+        return jsonify(response)
     except Exception as exc:
-        if state and state.get('numbers'):
-            return jsonify({**state, 'platformPeriod': platform_period, 'omission': state.get('omission', {str(i): 0 for i in range(8)}), 'ok': True, 'isNew': False, 'waitingForNewResult': True, 'error': str(exc)})
+        # Never erase a confirmed result on a transient API error.
+        if state.get('numbers'):
+            response = {
+                **state,
+                'platformPeriod': platform_period,
+                'currentPeriod': period_str,
+                'dataStats': stats_from_groups(state.get('groups', {})),
+                'ok': True,
+                'isNew': False,
+                'waitingForNewResult': True,
+                'error': str(exc)
+            }
+            return jsonify(response)
         return jsonify({'ok': False, 'error': str(exc)}), 502
 
 

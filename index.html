@@ -16,17 +16,18 @@
     <main class="content" id="tornContent">
       <section class="card stats-card">
         <div class="section-title">数据统计</div>
-        <div class="prob-grid">
-          <div class="prob-item">单3<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item">单4<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item">单5<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item">单2<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item">单0<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item">单7<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item">单1<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item">单6<small>次数：--次</small><small>概率：--%</small></div>
+        <div class="stats-note">按当前期第1～18组区块数据统计</div>
+        <div class="prob-grid" id="probGrid">
+          <div class="prob-item" data-single="3">单3<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-single="4">单4<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-single="5">单5<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-single="2">单2<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-single="0">单0<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-single="7">单7<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-single="1">单1<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
         </div>
-        <div class="conclusion">结论：<strong>单--</strong> 为最高概率</div>
+        <div class="conclusion" id="statsConclusion">结论：等待第1～18组数据</div>
       </section>
 
       <section class="card hero-card">
@@ -51,20 +52,25 @@
       <section class="card">
         <div class="section-title">遗漏统计</div>
         <div class="omission-grid">
-          <div class="stat">单0<small id="omission0">--期</small></div>
-          <div class="stat">单1<small id="omission1">--期</small></div>
-          <div class="stat">单2<small id="omission2">--期</small></div>
-          <div class="stat">单3<small id="omission3">--期</small></div>
-          <div class="stat">单4<small id="omission4">--期</small></div>
-          <div class="stat">单5<small id="omission5">--期</small></div>
-          <div class="stat">单6<small id="omission6">--期</small></div>
-          <div class="stat">单7<small id="omission7">--期</small></div>
+          <div class="stat">单0<small>--期</small></div>
+          <div class="stat">单1<small>--期</small></div>
+          <div class="stat">单2<small>--期</small></div>
+          <div class="stat">单3<small>--期</small></div>
+          <div class="stat">单4<small>--期</small></div>
+          <div class="stat">单5<small>--期</small></div>
+          <div class="stat">单6<small>--期</small></div>
+          <div class="stat">单7<small>--期</small></div>
         </div>
       </section>
 
       <section class="card">
         <div class="section-title">20期区块数据</div>
-        <div class="placeholder table-placeholder">等待数据</div>
+        <div class="group-table-wrap">
+          <table class="group-table">
+            <thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead>
+            <tbody id="groupTableBody"><tr><td colspan="4">等待数据</td></tr></tbody>
+          </table>
+        </div>
       </section>
     </main>
     <main class="content" id="historyContent" hidden>
@@ -99,6 +105,27 @@
   tornTab.addEventListener('click',()=>selectTab(tornTab));
   historyTab.addEventListener('click',()=>selectTab(historyTab));
 
+  function renderStats(data){
+    const rows = data.dataStats?.stats || [];
+    rows.forEach(row=>{
+      const el=document.querySelector(`[data-single="${row.single}"]`);
+      if(!el) return;
+      const sm=el.querySelectorAll('small');
+      if(sm[0]) sm[0].textContent=`次数：${row.count}次`;
+      if(sm[1]) sm[1].textContent=`概率：${Number(row.probability||0).toFixed(2)}%`;
+    });
+    const sample=data.dataStats?.sampleSize||0;
+    const highest=data.dataStats?.highest||[];
+    const text=highest.length ? `结论：${highest.map(x=>`单${x.single}`).join('、')} 最高（${highest[0].count}次 / ${sample}组）` : '结论：等待第1～18组数据';
+    document.getElementById('statsConclusion').textContent=text;
+  }
+
+  function renderGroups(groups){
+    const body=document.getElementById('groupTableBody');
+    if(!groups || !groups.length){ body.innerHTML='<tr><td colspan="4">等待区块数据</td></tr>'; return; }
+    body.innerHTML=groups.map(g=>`<tr><td>第${g.group}组</td><td>${g.blockNumber ?? '--'}</td><td>单${g.singleCount ?? '--'}</td><td>${(g.numbers||[]).join(' ')||'--'}</td></tr>`).join('');
+  }
+
   async function loadDraw(){
     try{
       const res=await fetch('/api/draw',{cache:'no-store'});
@@ -108,7 +135,8 @@
       document.getElementById('singleValue').textContent=(data.singleCount ?? '--');
       document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=(data.numbers&&data.numbers[i])||'--';});
       document.getElementById('blockValue').textContent=data.blockNumber??'--';
-      for(let i=0;i<=7;i++){ document.getElementById('omission'+i).textContent=((data.omission&&data.omission[String(i)]) ?? '--')+'期'; }
+      renderStats(data);
+      renderGroups(data.groups||[]);
     }catch(err){
       console.error(err);
     }
