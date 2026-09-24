@@ -310,12 +310,12 @@ def save_record(period, idx, block, block_hash, calc, ts):
 
 def king_prediction(day, idx, period, rows):
     # 第17组完成后，用当前期前17组的“单几”频率统计来确定第20组统计倾向。
-    # 规则：单0～单6分别统计出现次数，出现次数最多者作为统计结论。
+    # 规则：单0～单7分别统计出现次数，出现次数最多者作为统计结论。
     if len(rows)<17: return None
     with lock:
         c=db(); existing=c.execute("SELECT prediction FROM king_predictions WHERE day=? AND period_index=?",(day,idx)).fetchone()
         if existing and existing["prediction"]: c.close(); return existing["prediction"]
-    counts={i:0 for i in range(7)}
+    counts={i:0 for i in range(8)}
     for r in rows[:17]:
         odd=int(r["odd"])
         if 0 <= odd <= 7:
@@ -323,7 +323,7 @@ def king_prediction(day, idx, period, rows):
     mx=max(counts.values())
     if mx <= 0: return None
     # 同频时不人为制造概率差异：保留最先出现的并列最大值。
-    pred=f"单{next(i for i in range(7) if counts[i]==mx)}"
+    pred=f"单{next(i for i in range(8) if counts[i]==mx)}"
     with lock:
         c=db(); c.execute("""INSERT OR IGNORE INTO king_predictions(day,period_index,period,prediction,predicted_at)
              VALUES(?,?,?,?,?)""",(day,idx,period,pred,datetime.now(timezone.utc).isoformat())); c.commit(); c.close()
@@ -407,7 +407,7 @@ def historical_prediction(all_rows, target_period):
         if seq==latest_seq:
             nxt=int(completed[i]["odd"]); counts[nxt]+=1; matches.append(completed[i]["period"])
     total=sum(counts.values())
-    probs={str(i):round((counts[i]*100/total),2) if total else 0 for i in range(0,7)}
+    probs={str(i):round((counts[i]*100/total),2) if total else 0 for i in range(0,8)}
     return {"pattern":[f"单{x}" for x in latest_seq],"pattern_len":n,"matches":total,"probabilities":probs,
             "match_periods":matches[-20:],"target_period":target_period,"basis":"历史正式开奖数据"}
 
@@ -423,7 +423,7 @@ def state():
         cycles=c.execute("SELECT * FROM king_predictions WHERE actual IS NOT NULL ORDER BY day DESC,period_index DESC LIMIT 60").fetchall()
         c.close()
     chain=latest.get("chain_block"); progress=current_position(target,chain)
-    pred=kp["prediction"] if kp else (king_prediction(day,idx,period,get_minute_blocks(day,idx,17)) if progress>=17 else None)
+    pred=kp["prediction"] if kp else king_prediction(day,idx,period,get_minute_blocks(day,idx,17)) if len(get_minute_blocks(day,idx,17))>=17 else None
     actual=kp["actual"] if kp else None
     current_rows=get_minute_blocks(day,idx,20)
     actual_numbers=None
@@ -437,10 +437,10 @@ def state():
         actual_odd=int(r20["odd"]); actual_even=int(r20["even"])
         actual_block=int(r20["block"]); actual_hash=r20["hash"]
     recent60=all_rows[-60:]
-    single_counts={str(i):sum(1 for r in recent60 if int(r["odd"])==i) for i in range(0,7)}
+    single_counts={str(i):sum(1 for r in recent60 if int(r["odd"])==i) for i in range(0,8)}
     combo_counts=Counter(f"单{r['odd']}" for r in recent60)
     current20=[dict(r) for r in current_rows]
-    ccounts={str(i):sum(1 for r in current_rows if int(r["odd"])==i) for i in range(0,7)}
+    ccounts={str(i):sum(1 for r in current_rows if int(r["odd"])==i) for i in range(0,8)}
     ctotal=len(current_rows)
     cprobs={k:round(v*100/ctotal,2) if ctotal else 0 for k,v in ccounts.items()}
     histpred=historical_prediction(all_rows,period)
@@ -506,8 +506,6 @@ th{background:#f5f6f8;font-weight:800}
 
 <section id="s1" class="section show">
 
-</div>
-
 <div class="card center">
 <div class="label" id="cycleLabel">当前20组状态</div>
 <div class="status" id="status">等待中</div>
@@ -567,7 +565,7 @@ th{background:#f5f6f8;font-weight:800}
 </div>
 
 <div class="card">
-<b>最近60期：单0～单6出现次数</b>
+<b>最近60期：单0～单7出现次数</b>
 <div id="singleCounts" style="margin-top:5px"></div>
 </div>
 
@@ -584,7 +582,7 @@ th{background:#f5f6f8;font-weight:800}
 </table>
 </div>
 
-<div class="card note">概率仅由历史模式匹配次数计算；页面只显示单0～单6的统计概率。概率用于统计参考，由你自行选择。</div>
+<div class="card note">概率仅由历史模式匹配次数计算；页面显示单0～单7的统计概率。概率用于统计参考，由你自行选择。</div>
 </section>
 
 </div>
@@ -631,13 +629,13 @@ async function refresh(){
 
   const cps=d.current20_single_probs||{};
   const ccs=d.current20_single_counts||{};
-  document.getElementById('current20Stats').innerHTML=[0,1,2,3,4,5,6].map(i=>
+  document.getElementById('current20Stats').innerHTML=[0,1,2,3,4,5,6,7].map(i=>
     '<div class="statbox"><b>单'+i+'</b><span>'+Number(cps[String(i)]||0).toFixed(2)+'% · '+(ccs[String(i)]||0)+'组</span></div>'
   ).join('');
 
   const sc=d.single_counts||{};
   document.getElementById('singleCounts').innerHTML=
-   [0,1,2,3,4,5,6].map(i=>
+   [0,1,2,3,4,5,6,7].map(i=>
     '<span class="badge">单'+i+'：'+(sc[String(i)]||0)+'次</span>'
    ).join('');
 
@@ -650,7 +648,7 @@ async function refresh(){
   document.getElementById('histMatches').textContent=hp ? hp.matches : '0';
   document.getElementById('histPattern').textContent=hp ? hp.pattern.join(' → ') : '历史数据不足';
   document.getElementById('histBasis').textContent=hp ? ('匹配历史模式后统计下一期1～7单的分布；当前使用'+hp.pattern_len+'期模式。') : '至少需要足够的历史正式开奖数据。';
-  document.getElementById('probabilities').innerHTML=hp ? [0,1,2,3,4,5,6].map(i=>{
+  document.getElementById('probabilities').innerHTML=hp ? [0,1,2,3,4,5,6,7].map(i=>{
     const v=Number(hp.probabilities[String(i)]||0);
     return '<div class="statrow"><b>单'+i+'</b><span>'+v.toFixed(2)+'%</span></div>';
   }).join('') : '暂无历史模式匹配';
