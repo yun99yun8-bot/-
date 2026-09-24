@@ -223,7 +223,8 @@
   var lastZeroMinute='';
   function beijingParts(){
     var now=new Date();
-    var ms=now.getTime()+now.getTimezoneOffset()*60000+8*3600000;
+    // Platform display was measured ~4s behind Beijing time.
+    var ms=now.getTime()+now.getTimezoneOffset()*60000+8*3600000-4000;
     return new Date(ms);
   }
   function tickCountdown(){
@@ -238,7 +239,7 @@
     }
   }
   loadDraw();
-  window.setInterval(loadDraw,1000); // groups/AI remain live
+  window.setInterval(loadDraw,500); // faster live result/group pickup
   tickCountdown(); window.setInterval(tickCountdown,200);
 })();
 </script>

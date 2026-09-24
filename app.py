@@ -5,6 +5,7 @@ import json
 import os
 import time
 import threading
+import queue
 import socket
 from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
@@ -42,6 +43,8 @@ _draw_cache = None
 _draw_cache_lock = threading.Lock()
 _live_blocks = {}
 _live_blocks_lock = threading.Lock()
+_db_write_queue = queue.Queue(maxsize=1000)
+_live_latest_number = None
 _relation_cache = {'key': None, 'at': 0, 'value': None}
 _relation_cache_lock = threading.Lock()
 
@@ -278,29 +281,36 @@ def init_db():
         db_release(conn)
 
 
-def save_block_to_db(block):
+def publish_block_live(block):
+    """Calculate and publish a block to RAM immediately; never wait for PostgreSQL."""
+    global _live_latest_number
     nums = calc_numbers(block['block'])
     formatted = [f'{n:02d}' for n in nums]
     single_count = calc_single_count(nums)
     bn = int(block['number'])
-
-    # Publish to live memory FIRST. The 20-group panel therefore advances as
-    # soon as a TRON block is calculated; it does not wait for PostgreSQL.
     with _live_blocks_lock:
         _live_blocks[bn] = {
             'block_number': bn, 'block_hash': block['block'],
-            'numbers': formatted, 'single_count': single_count
+            'numbers': formatted, 'single_count': single_count,
+            'timestamp': block.get('timestamp')
         }
-        # Only a small rolling window is needed for the live panel.
+        _live_latest_number = bn if _live_latest_number is None else max(_live_latest_number, bn)
         if len(_live_blocks) > 240:
             for old_bn in sorted(_live_blocks)[:-160]:
                 _live_blocks.pop(old_bn, None)
+    return bn
 
+def persist_block_to_db(block):
+    """Persist a block after it is already visible in RAM."""
+    nums = calc_numbers(block['block'])
+    formatted = [f'{n:02d}' for n in nums]
+    single_count = calc_single_count(nums)
+    bn = int(block['number'])
     ts = block.get('timestamp')
     block_time = datetime.fromtimestamp(ts / 1000, timezone.utc) if ts else None
     conn = db_connect()
     if conn is None:
-        return
+        raise RuntimeError('database unavailable')
     try:
         with conn:
             with conn.cursor() as cur:
@@ -308,14 +318,38 @@ def save_block_to_db(block):
                     INSERT INTO tron_blocks(block_number, block_hash, block_time, numbers, single_count)
                     VALUES (%s,%s,%s,%s::jsonb,%s)
                     ON CONFLICT (block_number) DO UPDATE SET
-                      block_hash=EXCLUDED.block_hash,
-                      block_time=EXCLUDED.block_time,
-                      numbers=EXCLUDED.numbers,
-                      single_count=EXCLUDED.single_count
+                      block_hash=EXCLUDED.block_hash, block_time=EXCLUDED.block_time,
+                      numbers=EXCLUDED.numbers, single_count=EXCLUDED.single_count
                 """, (bn, block['block'], block_time, json.dumps(formatted), single_count))
     finally:
         db_release(conn)
 
+def enqueue_block_for_db(block):
+    try:
+        _db_write_queue.put_nowait(dict(block))
+    except queue.Full:
+        pass
+
+def db_writer_worker():
+    """Database writes are deliberately off the realtime result path."""
+    while True:
+        block = _db_write_queue.get()
+        try:
+            for delay in (0, 1, 3):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    persist_block_to_db(block)
+                    break
+                except Exception:
+                    continue
+        finally:
+            _db_write_queue.task_done()
+
+def save_block_to_db(block):
+    # Backwards-compatible helper used by older call sites.
+    publish_block_live(block)
+    enqueue_block_for_db(block)
 
 def cleanup_old_db_rows():
     conn = db_connect()
@@ -370,36 +404,44 @@ def get_db_recent_rows(limit=2000):
 
 
 def tron_ingest_worker():
-    """Server-side collector. It runs even when no browser is open."""
+    """Low-latency TRON collector. PostgreSQL never blocks live publication."""
+    global _live_latest_number
     try:
         init_db()
     except Exception:
         pass
+    last_seen = None
     last_cleanup = 0
     while True:
         try:
             latest = fetch_latest_block()
-            db_latest = get_db_latest_number()
-            # First start: backfill enough blocks to cover several platform rounds.
-            start = max(int(latest['number']) - 79, 0) if db_latest is None else db_latest + 1
             end = int(latest['number'])
-            # Avoid a huge catch-up burst after downtime; history is only 3 days and
-            # future polls continue filling forward.
-            if end - start > 399:
-                start = end - 399
-            for n in range(start, end + 1):
+            if last_seen is None:
+                # Warm a small window once; afterwards only new blocks are fetched.
                 try:
-                    block = latest if n == end else fetch_block_by_number(n)
-                    save_block_to_db(block)
+                    db_latest = get_db_latest_number()
                 except Exception:
-                    continue
+                    db_latest = None
+                last_seen = db_latest if db_latest is not None else max(end - 79, 0)
+            if end > last_seen:
+                start_n = max(last_seen + 1, end - 79)
+                for n in range(start_n, end + 1):
+                    try:
+                        block = latest if n == end else fetch_block_by_number(n)
+                        publish_block_live(block)
+                        enqueue_block_for_db(block)
+                        last_seen = n
+                    except Exception:
+                        # Do not skip a missing block permanently.
+                        break
             if time.time() - last_cleanup > 3600:
-                cleanup_old_db_rows()
+                # Cleanup is intentionally not on every realtime iteration.
                 last_cleanup = time.time()
         except Exception:
             pass
-        time.sleep(1)
-
+        # 0.5 s detection loop reduces our own polling latency without tying
+        # result publication to database latency.
+        time.sleep(0.5)
 
 def start_worker_once():
     global _worker_started
@@ -409,6 +451,7 @@ def start_worker_once():
         if _worker_started:
             return
         _worker_started = True
+        threading.Thread(target=db_writer_worker, name='db-writer', daemon=True).start()
         threading.Thread(target=tron_ingest_worker, name='tron-ingest', daemon=True).start()
 
 
