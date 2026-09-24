@@ -62,7 +62,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v8.1.4-tron-throttle-gaprepair-1'
+MODEL_VERSION = 'v8.1.5-event-g17-g20-barrier-dbfirst-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -79,6 +79,15 @@ _tron_cooldown_until = 0.0
 _tron_rate_diag = {'last429At': None, 'cooldownUntil': None, 'requestCount': 0, '429Count': 0}
 TRON_MIN_REQUEST_INTERVAL = 0.85
 TRON_429_COOLDOWN_SECONDS = 18.0
+
+# V8.1.5 event-driven prediction path. G17 publication emits a local event;
+# G20 has a pre-publication barrier that gives DB/RAM reconstruction one final
+# chance to durably lock the already-available pre-result snapshot.
+_g17_event_queue = queue.Queue(maxsize=32)
+_g17_event_seen = set()
+_g17_event_lock = threading.Lock()
+_barrier_diag = {'g17Events': 0, 'g17Locks': 0, 'g20Barriers': 0, 'g20BarrierLocks': 0, 'last': None}
+_barrier_diag_lock = threading.Lock()
 
 def _tron_rate_wait():
     global _tron_last_request_at
@@ -225,6 +234,85 @@ def fetch_block_fast(number):
     raise RuntimeError('target block not yet available: '+' | '.join(errors.values()))
 
 
+def _reconstruct_period_groups_dbfirst(date_str, period, target20):
+    """Build the current 1..20 snapshot from RAM + PostgreSQL only.
+    No upstream HTTP is allowed here: this function is safe inside the G20 barrier.
+    """
+    wanted=[int(target20)-(20-g) for g in range(1,21)]
+    rows={}
+    try: rows.update(get_db_blocks(wanted))
+    except Exception: pass
+    with _live_blocks_lock:
+        for bn in wanted:
+            if bn in _live_blocks: rows[bn]=dict(_live_blocks[bn])
+    groups={}; key=f'{date_str}:{int(period):04d}'
+    for g,bn in enumerate(wanted,1):
+        row=rows.get(bn)
+        if not row: continue
+        nums=row.get('numbers') or []
+        if not isinstance(nums,list):
+            try: nums=json.loads(nums)
+            except Exception: nums=[]
+        groups[str(g)]={'group':g,'period':f'{int(period):04d}','periodKey':key,'target20':int(target20),
+                        'blockNumber':bn,'block':row.get('block_hash') or row.get('block'),
+                        'numbers':nums,'singleCount':int(row.get('single_count'))}
+    return groups
+
+
+def _lock_g17_snapshot(date_str, period, target20, source):
+    """Idempotently lock only when G1..G17 are present and G20 is not published."""
+    key=f'{date_str}:{int(period):04d}'
+    if prediction_exists(key) is not None: return True
+    groups=_reconstruct_period_groups_dbfirst(date_str,period,target20)
+    if groups.get('20') or not all(str(i) in groups for i in range(1,18)):
+        trace_period_lifecycle(date_str,period,target20,'event_lock_not_ready',groups,{'source':source})
+        return False
+    trace_period_lifecycle(date_str,period,target20,'event_lock_attempt',groups,{'source':source},increment_attempt=True)
+    save_conclusion17_if_ready(date_str,period,groups,target20)
+    save_prediction_if_ready(date_str,period,groups,target20,force_backend=True)
+    flush_pending_ai_predictions()
+    ok=prediction_exists(key) is not None
+    trace_period_lifecycle(date_str,period,target20,'event_lock_success' if ok else 'event_lock_not_durable',groups,{'source':source})
+    if ok: set_period_runtime(date_str,period,target20,'AI_LOCKED',len(groups))
+    return ok
+
+
+def g17_event_worker():
+    while True:
+        worker_touch('g17-event')
+        try:
+            ds,p,target,key=_g17_event_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        try:
+            ok=_lock_g17_snapshot(ds,p,target,'g17_publish_event')
+            with _barrier_diag_lock:
+                if ok: _barrier_diag['g17Locks'] += 1
+                _barrier_diag['last']={'event':'g17_event_lock','periodKey':key,'ok':bool(ok)}
+        except Exception as exc:
+            worker_touch('g17-event',exc)
+        finally:
+            _g17_event_queue.task_done()
+
+
+def _g20_prepublication_barrier(date_str, period, target20):
+    """Before G20 becomes visible, reconstruct G1..G17 from DB/RAM and lock.
+    Never performs network backfill and never creates a prediction after G20 publication.
+    """
+    key=f'{date_str}:{int(period):04d}'
+    with _barrier_diag_lock:
+        _barrier_diag['g20Barriers'] += 1
+    ok=False
+    try:
+        ok=_lock_g17_snapshot(date_str,period,target20,'g20_prepublication_barrier')
+    except Exception as exc:
+        worker_touch('target-result-fast',f'g20 barrier: {exc}')
+    with _barrier_diag_lock:
+        if ok: _barrier_diag['g20BarrierLocks'] += 1
+        _barrier_diag['last']={'event':'g20_barrier','periodKey':key,'ok':bool(ok)}
+    return ok
+
+
 def target_result_fast_worker():
     """Directly watch the known group-20 block, bypassing latest-block and DB paths."""
     last_target = None
@@ -243,6 +331,9 @@ def target_result_fast_worker():
             if not ready:
                 try:
                     block, provider, latency_ms, errors = fetch_block_fast(target)
+                    # G20 barrier: while the result is still private to this thread,
+                    # use only RAM/PostgreSQL to durably lock any complete G17 snapshot.
+                    _g20_prepublication_barrier(date_str, period, target)
                     publish_block_live(block)
                     enqueue_block_for_db(block)
                     with _fast_diag_lock:
@@ -544,6 +635,21 @@ def publish_block_live(block):
         if len(_live_blocks) > 240:
             for old_bn in sorted(_live_blocks)[:-160]:
                 _live_blocks.pop(old_bn, None)
+    # Event-driven G17 trigger: do not wait for the 200ms period poller.
+    try:
+        ds,p,_,_=current_period(); target=period_target_block(ds,p)
+        if bn == int(target)-3:
+            key=f'{ds}:{int(p):04d}'
+            with _g17_event_lock:
+                fresh=key not in _g17_event_seen
+                if fresh: _g17_event_seen.add(key)
+            if fresh:
+                try: _g17_event_queue.put_nowait((ds,int(p),int(target),key))
+                except queue.Full: pass
+                with _barrier_diag_lock:
+                    _barrier_diag['g17Events'] += 1; _barrier_diag['last']={'event':'g17_published','periodKey':key,'block':bn}
+    except Exception:
+        pass
     return bn
 
 def persist_block_to_db(block):
@@ -982,7 +1088,7 @@ def _start_managed_worker(name, target):
 def supervisor_worker():
     """Restart workers that exit. Heartbeats expose blocked workers for diagnosis."""
     targets={'db-writer':db_writer_worker,'tron-ingest':tron_ingest_worker,
-             'target-result-fast':target_result_fast_worker,'ai-prediction':ai_prediction_worker,
+             'target-result-fast':target_result_fast_worker,'g17-event':g17_event_worker,'ai-prediction':ai_prediction_worker,
              'smart-db':smart_db_worker,'period-engine':autonomous_period_worker}
     while True:
         worker_touch('supervisor')
@@ -1061,6 +1167,7 @@ def start_worker_once():
         _start_managed_worker('db-writer',db_writer_worker)
         _start_managed_worker('tron-ingest',tron_ingest_worker)
         _start_managed_worker('target-result-fast',target_result_fast_worker)
+        _start_managed_worker('g17-event',g17_event_worker)
         _start_managed_worker('ai-prediction',ai_prediction_worker)
         _start_managed_worker('smart-db',smart_db_worker)
         _start_managed_worker('period-engine',autonomous_period_worker)
@@ -2107,6 +2214,7 @@ def system_health():
         runtime['workerRestarts']=dict(_worker_restarts)
         with _tron_http_lock:
             runtime['tronRateLimit']=dict(_tron_rate_diag)
+            with _barrier_diag_lock: runtime['eventDrivenLifecycle']=dict(_barrier_diag)
         return jsonify({'ok':True,'period':ps,'platformPeriod':platform,'modelVersion':MODEL_VERSION,'counts':counts,'runtime':runtime})
     except Exception as exc:
         return jsonify({'ok':False,'error':type(exc).__name__,'message':str(exc)[:200],'runtime':dict(_runtime_health)}),503
