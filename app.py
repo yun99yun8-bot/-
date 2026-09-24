@@ -61,6 +61,10 @@ with lock:
         UNIQUE(day,period_index,position),
         UNIQUE(block)
     )""")
+    try:
+        c.execute("ALTER TABLE minute_blocks ADD COLUMN source_version INTEGER NOT NULL DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass
     c.execute("""CREATE TABLE IF NOT EXISTS king_predictions(
         day TEXT NOT NULL,
         period_index INTEGER NOT NULL,
@@ -164,55 +168,103 @@ def block_timestamp(block):
         return None
 
 
+def fetch_block_checked(number):
+    try:
+        data=fetch_block_by_number(number)
+        raw=data.get("block_header",{}).get("raw_data",{})
+        bh=data.get("blockID"); bn=raw.get("number"); ts=raw.get("timestamp")
+        if bh and bn is not None and int(bn)==int(number) and ts is not None:
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def find_latest_block_before(boundary_ms, lower_ms=None, center=None, radius=28, chain=None):
+    """Find the highest real TRON block whose timestamp is before the boundary.
+    Heights are only a search aid; timestamps decide the result. This handles
+    missed slots, so a period may advance by 18/19/20+ heights rather than a
+    hard-coded +20.
+    """
+    if center is None:
+        center = int(chain or 0)
+    if not center:
+        return None
+    hi=int(chain or center)
+    lo=max(1, center-int(radius))
+    best=None
+    # Scan from high to low so the first valid block is the latest one.
+    for b in range(min(hi,center+int(radius)), lo-1, -1):
+        data=fetch_block_checked(b)
+        if not data: continue
+        ts=int(data["block_header"]["raw_data"]["timestamp"])
+        if ts < boundary_ms and (lower_ms is None or ts >= lower_ms):
+            return data
+        if ts >= boundary_ms:
+            continue
+    return best
+
+
 def target_block_for_datetime(dt):
-    day=dt.strftime("%Y-%m-%d"); idx=dt.hour*60+dt.minute
-    if idx < 1: idx = 1
-    saved=get_period_target(day,idx)
-    if saved is not None: return saved,True
-
-    # 官方期号对应“该分钟结束附近的最后一个TRON区块”。
-    # 不再使用 anchor + idx*20，因为TRON偶尔会漏块，实际期号间隔可能是18、19、20等。
-    prev=get_period_target(day,idx-1) if idx>1 else None
-    if prev is None and idx==1:
-        prev_day=(dt-timedelta(days=1)).strftime("%Y-%m-%d")
-        prev=get_period_target(prev_day,1440)
-    with lock: chain=latest.get("chain_block")
-    if chain is None: return None,False
-
-    # 以20块/分钟作估计中心，然后在附近区块中寻找时间戳最接近本期分钟边界的区块。
-    center=(prev+20) if prev is not None else int(chain)
-    boundary=dt.replace(second=0,microsecond=0)+timedelta(minutes=1)
-    boundary_ms=int(boundary.timestamp()*1000)
-    candidates=[]
-    for b in range(max(1,center-12), center+13):
-        if b>int(chain): continue
-        ts=block_timestamp(b)
-        if ts is not None:
-            candidates.append((abs(ts-boundary_ms), b, ts))
-    if not candidates: return None,False
-    # 只接受位于本分钟/边界附近的区块；否则等待下一轮获取更多链数据。
-    candidates.sort(key=lambda x:x[0])
-    _, target, _ = candidates[0]
-    save_period_target(day,idx,target)
-    return target,False
-
+    # The official target is always the actual 20th-group block. Do not use
+    # cached target heights from older versions because missed TRON slots can
+    # make consecutive period heights differ by 18/19/20+.
+    day=dt.strftime("%Y-%m-%d"); idx=max(1,dt.hour*60+dt.minute)
+    rows=get_minute_blocks(day,idx,20)
+    r20=next((r for r in rows if int(r["position"])==20),None)
+    return (int(r20["block"]),True) if r20 else (None,False)
 
 def current_position(target, chain_block):
-    # 20组是当前一分钟内部的20个进度槽；进度按北京时间的秒数推进。
-    now=local_now()
-    sec=now.second + now.microsecond/1_000_000
-    pos=int(sec/3)+1
-    return max(1,min(20,pos))
+    # One platform minute contains twenty 3-second progress slots.
+    now=local_now(); sec=now.second + now.microsecond/1_000_000
+    return max(1,min(20,int(sec/3)+1))
 
+
+def group_block_for_position(day, idx, position, target=None):
+    """Resolve the actual TRON block produced in a 3-second platform slot.
+    The slot timestamp, not block-height arithmetic, is authoritative. If the
+    scheduled slot was missed there may be no block for that group.
+    """
+    from zoneinfo import ZoneInfo
+    tz=ZoneInfo(os.getenv("APP_TIMEZONE","Asia/Shanghai"))
+    base=datetime.strptime(day,"%Y-%m-%d").replace(tzinfo=tz)+timedelta(minutes=int(idx))
+    slot_start=base+timedelta(seconds=(int(position)-1)*3)
+    slot_end=slot_start+timedelta(seconds=3)
+    start_ms=int(slot_start.timestamp()*1000)
+    end_ms=int(slot_end.timestamp()*1000)
+    now_utc=datetime.now(timezone.utc)
+    with lock: chain=latest.get("chain_block")
+    if chain is None: return None
+    # Estimate the height from the current chain head and the slot midpoint.
+    slot_mid=(slot_start+timedelta(seconds=1.5)).astimezone(timezone.utc)
+    age=(now_utc-slot_mid).total_seconds()
+    center=int(round(int(chain)-age/3.0))
+    if target is not None and int(position)==20:
+        center=int(target)
+    center=max(1,center)
+    lo=max(1,center-16); hi=min(int(chain),center+16)
+    candidates=[]
+    for b in range(lo,hi+1):
+        data=fetch_block_checked(b)
+        if not data: continue
+        ts=int(data["block_header"]["raw_data"]["timestamp"])
+        if start_ms <= ts < end_ms:
+            candidates.append((ts,b,data))
+    if not candidates:
+        return None
+    # One slot should contain at most one canonical block. Choose the earliest
+    # block in the slot if an API response is duplicated around a boundary.
+    candidates.sort(key=lambda x:(x[0],x[1]))
+    return candidates[0][2]
 
 def save_minute_block(day, idx, pos, block, block_hash, calc, ts):
     with lock:
-        c=db(); c.execute("""INSERT OR IGNORE INTO minute_blocks(day,period_index,position,block,hash,odd,even,numbers,ts)
-             VALUES(?,?,?,?,?,?,?,?,?)""",(day,idx,pos,int(block),block_hash,calc["odd"],calc["even"],",".join(map(str,calc["numbers"])),ts)); c.commit(); c.close()
+        c=db(); c.execute("""INSERT OR IGNORE INTO minute_blocks(day,period_index,position,block,hash,odd,even,numbers,ts,source_version)
+             VALUES(?,?,?,?,?,?,?,?,?,2)""",(day,idx,pos,int(block),block_hash,calc["odd"],calc["even"],",".join(map(str,calc["numbers"])),ts)); c.commit(); c.close()
 
 
 def get_minute_blocks(day, idx, upto=None):
-    q="SELECT * FROM minute_blocks WHERE day=? AND period_index=?"
+    q="SELECT * FROM minute_blocks WHERE day=? AND period_index=? AND source_version=2"
     args=[day,idx]
     if upto is not None: q+=" AND position<=?"; args.append(int(upto))
     q+=" ORDER BY position"
@@ -257,39 +309,44 @@ def resolve_king(day,idx,period,rows):
 
 def process_current_minute():
     dt=local_now(); period,idx=period_info(dt); day=dt.strftime("%Y-%m-%d")
-    target,confirmed=target_block_for_datetime(dt)
     with lock: chain=latest.get("chain_block")
-    if target is None or chain is None: return
-    pos=current_position(target,chain)
-    # 只读取当前分钟已经产生的区块：position 1对应target-19，position20对应target。
-    existing={r["position"] for r in get_minute_blocks(day,idx)}
-    for p in range(1,pos+1):
+    if chain is None: return
+    pos=current_position(None,chain)
+
+    rows=get_minute_blocks(day,idx,20)
+    existing={int(r["position"]) for r in rows}
+    # Fill the current slot and retry any immediately preceding missing slots.
+    # We never fabricate a group from a block-height formula.
+    for p in range(max(1,pos-2),pos+1):
         if p in existing: continue
-        block=target-20+p
-        try: data=fetch_block_by_number(block)
-        except Exception as ex:
-            print("minute block fetch error",block,repr(ex),flush=True); continue
-        raw=data.get("block_header",{}).get("raw_data",{}); bh=data.get("blockID"); actual=raw.get("number")
-        if not bh or actual is None or int(actual)!=block: continue
+        data=group_block_for_position(day,idx,p,None)
+        if not data: continue
+        raw=data.get("block_header",{}).get("raw_data",{})
+        block=int(raw.get("number")); bh=data.get("blockID")
         calc=calculate_numbers(bh)
         if not calc: continue
-        ts=datetime.fromtimestamp(int(raw.get("timestamp",int(time.time()*1000)))/1000,tz=timezone.utc).isoformat()
+        ts=datetime.fromtimestamp(int(raw.get("timestamp"))/1000,tz=timezone.utc).isoformat()
         save_minute_block(day,idx,p,block,bh,calc,ts)
-    rows=get_minute_blocks(day,idx,20)
-    pred=king_prediction(day,idx,period,rows) if len(rows)>=17 else None
-    if len(rows)>=20:
-        # 正式开奖记录只保存第20组，避免把20个内部区块误当成20个开奖期。
-        r=rows[19]
-        nums=list(map(int,r["numbers"].split(",")))
-        calc={"numbers":nums,"odd":r["odd"],"even":r["even"],"tail_odd":sum((n%10)%2 for n in nums),"tail_even":0,"letters":"","digits":""}
-        calc["tail_even"]=7-calc["tail_odd"]
-        save_record(period,idx,r["block"],r["hash"],calc,r["ts"])
-        resolve_king(day,idx,period,rows)
-    latest.update({"period":period,"block":target,"target_block":target,"chain_block":chain,"progress":pos,"hash":rows[-1]["hash"] if rows else None,
-                   "numbers":list(map(int,rows[-1]["numbers"].split(","))) if rows else None,
-                   "odd":rows[-1]["odd"] if rows else None,"even":rows[-1]["even"] if rows else None,"confirmed_anchor":confirmed,
-                   "updated":datetime.now(timezone.utc).isoformat()})
 
+    rows=get_minute_blocks(day,idx,20)
+    pred=king_prediction(day,idx,period,rows) if len([r for r in rows if int(r["position"])<=17])>=17 else None
+    r20=next((r for r in rows if int(r["position"])==20),None)
+    if r20:
+        nums=list(map(int,r20["numbers"].split(",")))
+        calc={"numbers":nums,"odd":r20["odd"],"even":r20["even"],
+              "tail_odd":sum((n%10)%2 for n in nums),"tail_even":0,"letters":"","digits":""}
+        calc["tail_even"]=7-calc["tail_odd"]
+        save_record(period,idx,r20["block"],r20["hash"],calc,r20["ts"])
+        if len(rows)>=20:
+            resolve_king(day,idx,period,rows)
+
+    target=int(r20["block"]) if r20 else (int(rows[-1]["block"]) if rows else None)
+    last=rows[-1] if rows else None
+    latest.update({"period":period,"block":target,"target_block":target,"chain_block":chain,
+                   "progress":pos,"hash":last["hash"] if last else None,
+                   "numbers":list(map(int,last["numbers"].split(","))) if last else None,
+                   "odd":last["odd"] if last else None,"even":last["even"] if last else None,
+                   "confirmed_anchor":bool(r20),"updated":datetime.now(timezone.utc).isoformat()})
 
 def monitor():
     global last_seen_block
@@ -318,7 +375,7 @@ def historical_prediction(all_rows, target_period):
         if seq==latest_seq:
             nxt=int(completed[i]["odd"]); counts[nxt]+=1; matches.append(completed[i]["period"])
     total=sum(counts.values())
-    probs={str(i):round((counts[i]*100/total),2) if total else 0 for i in range(1,8)}
+    probs={str(i):round((counts[i]*100/total),2) if total else 0 for i in range(0,7)}
     return {"pattern":[f"单{x}" for x in latest_seq],"pattern_len":n,"matches":total,"probabilities":probs,
             "match_periods":matches[-20:],"target_period":target_period,"basis":"历史正式开奖数据"}
 
@@ -348,7 +405,7 @@ def state():
         actual_odd=int(r20["odd"]); actual_even=int(r20["even"])
         actual_block=int(r20["block"]); actual_hash=r20["hash"]
     recent60=all_rows[-60:]
-    single_counts={str(i):sum(1 for r in recent60 if int(r["odd"])==i) for i in range(1,8)}
+    single_counts={str(i):sum(1 for r in recent60 if int(r["odd"])==i) for i in range(0,7)}
     combo_counts=Counter(f"{r['odd']}单{r['even']}双" for r in recent60)
     current20=[dict(r) for r in current_rows]
     histpred=historical_prediction(all_rows,period)
@@ -358,7 +415,9 @@ def state():
             "prediction_total":int(done["n"] or 0),"hits":int(done["h"] or 0),"misses":int(done["n"] or 0)-int(done["h"] or 0),
             "hit_rate":round(int(done["h"] or 0)*100/int(done["n"]),1) if int(done["n"] or 0) else 0,
             "single_counts":single_counts,"combo_counts":dict(combo_counts.most_common()),
-            "king_history":[dict(x) for x in cycles],"current20":[dict(x) for x in current20],"history":[dict(x) for x in recent60[::-1]],"history_all":[dict(x) for x in all_rows[::-1]],
+            "king_history":[dict(x) for x in cycles],"current20":[dict(x) for x in current20],
+            "current20_single_counts":current20_single_counts,"current20_single_probs":current20_single_probs,
+            "history":[dict(x) for x in recent60[::-1]],"history_all":[dict(x) for x in all_rows[::-1]],
             "history_count":len(all_rows),"historical_prediction":histpred}
 
 
@@ -386,8 +445,13 @@ button.on{background:#222;color:#fff}
 .badge{display:inline-block;padding:4px 7px;background:#eef2ff;border-radius:7px;margin:2px;font-weight:700}
 .section{display:none}
 .section.show{display:block}
-table{width:100%;border-collapse:collapse;font-size:11px}
-th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-align:middle}
+table{width:100%;border-collapse:collapse;font-size:11px;border:1px solid #dfe3ea;border-radius:8px;overflow:hidden}
+th,td{padding:6px 3px;border:1px solid #e7eaf0;text-align:left;vertical-align:middle}
+th{background:#f5f6f8;font-weight:800}
+.tablewrap{border:1px solid #dfe3ea;border-radius:10px;overflow:hidden}
+.statsgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-top:7px}
+.statbox{background:#f6f7fa;border:1px solid #e5e8ee;border-radius:8px;padding:6px;text-align:center}
+.statbox b{display:block;font-size:15px}.statbox span{font-size:10px;color:#777}
 .note{font-size:10px;color:#888;line-height:1.4}
 .hash{font-size:10px;word-break:break-all;color:#555}
 .statrow{display:flex;justify-content:space-between;border-bottom:1px solid #eee;padding:5px 0}
@@ -443,11 +507,16 @@ th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-alig
 
 <div class="card">
 <b>当期20组实际记录</b>
-<div class="note" style="margin-top:5px">只显示当前期已经实际读取到的20组区块数据；每组独立显示7个号码及单双，20/20完成后显示完整20组。</div>
+<div class="note" style="margin-top:5px">当前期已经实际读取到的20组区块数据；每组显示7个号码和单数个数。数据逐组实时增加。</div>
+<div class="tablewrap" style="margin-top:7px">
 <table>
-<thead><tr><th>组</th><th>区块</th><th>7个号码</th><th>单双</th></tr></thead>
+<thead><tr><th>组</th><th>区块</th><th>7个号码</th><th>结果</th></tr></thead>
 <tbody id="current20"></tbody>
 </table>
+</div>
+<div style="margin-top:9px"><b>当期20组单数统计</b></div>
+<div class="note" style="margin-top:3px">按当前已经出现的各组结果计算；20组全部完成后即为本期完整统计。</div>
+<div class="statsgrid" id="current20Stats"></div>
 </div>
 
 <div class="card note">
@@ -470,12 +539,12 @@ th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-alig
 </div>
 
 <div class="card">
-<b>最近60期：1～7单出现次数</b>
+<b>最近60期：单0～单6出现次数</b>
 <div id="singleCounts" style="margin-top:5px"></div>
 </div>
 
 <div class="card">
-<b>最近60期单双组合</b>
+<b>最近60期：单数统计</b>
 <div id="comboStats" style="margin-top:5px"></div>
 </div>
 
@@ -487,7 +556,7 @@ th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-alig
 </table>
 </div>
 
-<div class="card note">概率仅由历史模式匹配次数计算：例如历史出现「单3→单4」后，统计下一期分别为单1～单7的次数，再换算成百分比。概率用于统计参考，由你自行选择。</div>
+<div class="card note">概率仅由历史模式匹配次数计算；页面只显示单0～单6的统计概率。概率用于统计参考，由你自行选择。</div>
 </section>
 
 </div>
@@ -515,14 +584,14 @@ async function refresh(){
   document.getElementById('chain').textContent=l.chain_block||'-';
 
   document.getElementById('pred').textContent=d.prediction ? ('预判期：'+d.display_period+'期｜'+d.prediction) : '等待17/20预判';
-  document.getElementById('actual').textContent=d.actual ? ('开奖期：'+d.display_period+'期｜第20组：'+d.actual) : '等待20/20开奖';
+  document.getElementById('actual').textContent=d.actual ? ('开奖期：'+d.display_period+'期｜第20组：'+d.actual.replace(/\d+双/g,'')) : '等待20/20开奖';
   document.getElementById('status').textContent=d.actual?'已开奖':'等待中';
 
   const actualNums=d.actual_numbers||[];
   document.getElementById('nums').textContent=actualNums.map(x=>String(x).padStart(2,'0')).join('、')||'-';
 
   document.getElementById('parity').innerHTML=d.actual ?
-   '<span class="badge">'+d.actual_odd+'单'+d.actual_even+'双</span>' : '';
+   '<span class="badge">单'+d.actual_odd+'</span>' : '';
 
   document.getElementById('hash').textContent=d.actual_hash||'';
 
@@ -533,25 +602,31 @@ async function refresh(){
 
   document.getElementById('current20').innerHTML=(d.current20||[]).map(x=>{
     const nums=(x.numbers||'').split(',').filter(Boolean).map(n=>String(n).padStart(2,'0')).join(' ');
-    return '<tr><td>第'+x.position+'组</td><td>'+x.block+'</td><td>'+esc(nums)+'</td><td>'+x.odd+'单'+x.even+'双</td></tr>';
+    return '<tr><td>第'+x.position+'组</td><td>'+x.block+'</td><td>'+esc(nums)+'</td><td>单'+x.odd+'</td></tr>';
   }).join('');
+
+  const cps=d.current20_single_probs||{};
+  const ccs=d.current20_single_counts||{};
+  document.getElementById('current20Stats').innerHTML=[0,1,2,3,4,5,6].map(i=>
+    '<div class="statbox"><b>单'+i+'</b><span>'+Number(cps[String(i)]||0).toFixed(2)+'% · '+(ccs[String(i)]||0)+'组</span></div>'
+  ).join('');
 
   const sc=d.single_counts||{};
   document.getElementById('singleCounts').innerHTML=
-   [1,2,3,4,5,6,7].map(i=>
-    '<span class="badge">'+i+'单：'+(sc[String(i)]||0)+'次</span>'
+   [0,1,2,3,4,5,6].map(i=>
+    '<span class="badge">单'+i+'：'+(sc[String(i)]||0)+'次</span>'
    ).join('');
 
   const combo=Object.entries(d.combo_counts||{});
   document.getElementById('comboStats').innerHTML=
-   combo.map(x=>'<span class="badge">'+esc(x[0])+' × '+x[1]+'期</span>').join('')||'暂无';
+   combo.map(x=>'<span class="badge">'+esc((x[0].match(/^(\d+)单/)||['',x[0]])[1])+'单 × '+x[1]+'期</span>').join('')||'暂无';
 
   const hp=d.historical_prediction;
   document.getElementById('histPredPeriod').textContent=hp ? (hp.target_period.slice(-4)+'期') : '-';
   document.getElementById('histMatches').textContent=hp ? hp.matches : '0';
   document.getElementById('histPattern').textContent=hp ? hp.pattern.join(' → ') : '历史数据不足';
   document.getElementById('histBasis').textContent=hp ? ('匹配历史模式后统计下一期1～7单的分布；当前使用'+hp.pattern_len+'期模式。') : '至少需要足够的历史正式开奖数据。';
-  document.getElementById('probabilities').innerHTML=hp ? [1,2,3,4,5,6,7].map(i=>{
+  document.getElementById('probabilities').innerHTML=hp ? [0,1,2,3,4,5,6].map(i=>{
     const v=Number(hp.probabilities[String(i)]||0);
     return '<div class="statrow"><b>单'+i+'</b><span>'+v.toFixed(2)+'%</span></div>';
   }).join('') : '暂无历史模式匹配';
@@ -560,7 +635,7 @@ async function refresh(){
   document.getElementById('hist').innerHTML=d.history_all.map(x=>
    '<tr><td>'+esc((x.period||'').slice(0,6))+'</td><td>'+esc((x.period||'').slice(-4))+'</td><td>'+x.block+'</td><td>'+
    x.numbers.split(',').map(n=>String(n).padStart(2,'0')).join(' ')+'</td><td>'+
-   x.odd+'单'+x.even+'双</td></tr>'
+   '单'+x.odd+'</td></tr>'
   ).join('');
  }catch(e){}
 }
