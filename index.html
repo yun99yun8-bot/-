@@ -50,7 +50,7 @@
       </section>
 
       <section class="card result-history-card">
-        <div class="section-title">往期20期单几</div>
+        <div class="section-title">往期20期数据</div>
         <div class="history20-note">只记录已经确认开奖的往期数据</div>
         <div class="history20-grid" id="resultHistory20">
           <div class="history20-item waiting">等待数据</div>
@@ -137,7 +137,8 @@
     const rows=Array.from({length:20},(_,i)=>history[i]||null);
     box.innerHTML=rows.map((row)=>{
       if(!row) return '<div class="history20-item waiting"><strong>--</strong><small>等待开奖</small></div>';
-      const period=row.platformPeriod || row.period || '--';
+      const rawPeriod=String(row.platformPeriod || row.period || '--');
+      const period=rawPeriod.length >= 4 ? rawPeriod.slice(-4) : rawPeriod;
       const single=(row.singleCount!==null && row.singleCount!==undefined) ? `单${row.singleCount}` : '--';
       return `<div class="history20-item"><strong>${period}</strong><small>${single}</small></div>`;
     }).join('');
