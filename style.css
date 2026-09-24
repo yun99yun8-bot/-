@@ -31,3 +31,12 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .content>.card:nth-child(3) .section-title{color:#1b67aa}
 .table-placeholder{min-height:180px;background:#f8fbff}
 @media(max-width:360px){.content{padding:2px 8px 12px}.topbar,.page-tabs{margin-left:8px;margin-right:8px}.card{padding:12px}.omission-grid{gap:4px}.stat{font-size:12px;padding:7px 1px}.stat small{font-size:9px;margin-top:2px}.result-grid{gap:5px}.result-box{height:43px;font-size:15px}.period-badge{font-size:12px;padding:6px 8px}}
+
+.stats-card{border-color:#e91e63;padding:11px 12px;margin-bottom:10px}
+.stats-card .section-title{color:#c2185b;margin-bottom:8px;font-size:16px}
+.prob-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
+.prob-item{border-radius:7px;padding:7px 2px;text-align:center;font-weight:800;font-size:12px;line-height:1.15;color:#24324b;background:#fff3f7;border:1px solid #f3d4df;min-width:0}
+.prob-item small{display:block;margin-top:3px;font-size:10px;color:#c2185b;font-weight:700}
+.conclusion{margin-top:8px;border-radius:8px;background:#fff0f5;color:#8f214d;text-align:center;padding:7px 6px;font-size:13px;font-weight:700}
+.conclusion strong{font-size:15px}
+@media(max-width:360px){.prob-grid{gap:4px}.prob-item{font-size:11px;padding:6px 1px}.prob-item small{font-size:9px}.conclusion{font-size:12px;padding:6px}}
