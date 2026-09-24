@@ -253,31 +253,34 @@ def calc_single_count(numbers):
 
 
 def period_target_block(date_str, period):
-    """Return the platform's group-20/result block for a period.
+    """Return the best-known platform group-20 block from confirmed anchors.
 
-    Calibration recorded from the platform:
-      2026-09-24 period 0481 -> 86511906.
-      The platform can occasionally make a +18 adjustment instead of +20;
-      the user reported one such adjustment around period 0480.
-      Current live calibration from the supplied screenshot is:
-      period 1001 -> block 86522304.
-
-    For the current/live range we therefore anchor to 1001 and advance +20
-    per period until the user reports another adjustment.
+    Important: the platform has occasional +18 transitions. We only encode
+    transitions whose location is known; we never invent the location of the
+    observed two-block shift between period 0551 and 1001. Current/live periods
+    are anchored from 1001, with the confirmed 1200->1201 +18 transition.
     """
-    # Piecewise calibration from confirmed platform screenshots.
-    # 1001 -> 86522304, then +20 through period 1200.
-    # 1200 -> 86526284 and 1201 -> 86526302, so the 1200->1201 step is +18.
-    # From 1201 onward we continue the normal +20 cadence until another
-    # platform adjustment is observed.
-    anchor_idx = period_index('2026-09-24', 1001)
-    idx = period_index(date_str, int(period))
-    block = 86522304 + (idx - anchor_idx) * 20
-    adjustment_idx = period_index('2026-09-24', 1201)
-    if idx >= adjustment_idx:
+    idx=period_index(date_str,int(period))
+    i480=period_index('2026-09-24',480)
+    i481=period_index('2026-09-24',481)
+    i551=period_index('2026-09-24',551)
+    i1001=period_index('2026-09-24',1001)
+    i1201=period_index('2026-09-24',1201)
+    if idx <= i480:
+        return 86511888 + (idx-i480)*20
+    if i481 <= idx <= i551:
+        return 86511906 + (idx-i481)*20
+    # The exact +18 transition between 0551 and 1001 was not observed. For
+    # that historical gap, use the nearest confirmed anchor rather than claim
+    # a fabricated transition point.
+    if idx < i1001:
+        if idx-i551 <= i1001-idx:
+            return 86513306 + (idx-i551)*20
+        return 86522304 + (idx-i1001)*20
+    block=86522304 + (idx-i1001)*20
+    if idx >= i1201:
         block -= 2
     return block
-
 
 def get_db_pool():
     """Create a small thread-safe PostgreSQL pool lazily.
@@ -372,6 +375,8 @@ def init_db():
                     )
                 """)
                 cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS prediction_top3 JSONB")
+                cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS conclusion17 SMALLINT")
+                cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS conclusion17_mode TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_predictions_date ON ai_predictions(period_date DESC, period_no DESC)")
         return True
     finally:
@@ -840,7 +845,7 @@ def group20_relation_model(date_str, period, lookback=120):
         _relation_cache.update({'key':cache_key,'at':now,'value':value})
     return value
 
-def ai_analysis_from_data(groups, historical, relation=None, max_group=19):
+def ai_analysis_from_data(groups, historical, relation=None):
     """Adaptive 8-class scoring model.
 
     Every class 单0..单7 is scored independently.  The model combines:
@@ -853,7 +858,7 @@ def ai_analysis_from_data(groups, historical, relation=None, max_group=19):
     The returned percentages are normalized *model scores*, not guaranteed
     probabilities.  No class is artificially promoted merely for variety.
     """
-    current = [int(groups[str(i)]['singleCount']) for i in range(1, int(max_group)+1)
+    current = [int(groups[str(i)]['singleCount']) for i in range(1, 20)
                if str(i) in groups and groups[str(i)].get('singleCount') is not None]
     if not current:
         return None, {}
@@ -901,7 +906,7 @@ def ai_analysis_from_data(groups, historical, relation=None, max_group=19):
     if relation and relation.get('positions'):
         votes = [1.0] * 8
         weight_total = 8.0
-        for g in range(1,int(max_group)+1):
+        for g in range(1,20):
             row = groups.get(str(g))
             st = relation['positions'].get(g) if isinstance(relation.get('positions'), dict) else None
             if not row or not st or row.get('singleCount') is None:
@@ -941,26 +946,62 @@ def ai_analysis_from_data(groups, historical, relation=None, max_group=19):
     pick = ranked[0]
     return pick, {str(i): round(scores[i], 2) for i in range(8)}
 
-def ai17_conclusion_from_data(groups, historical, relation=None):
-    """Independent 17-group AI conclusion.
+def ai_conclusion17_from_data(groups, historical):
+    """17-group conclusion model. Returns a model tendency, not a guaranteed probability."""
+    vals=[int(groups[str(i)]['singleCount']) for i in range(1,18)
+          if str(i) in groups and groups[str(i)].get('singleCount') is not None]
+    if len(vals) < 17:
+        return None
+    hist=[int(x) for x in historical if 0 <= int(x) <= 7]
+    cur=[vals.count(i) for i in range(8)]
+    h50=[hist[:50].count(i) for i in range(8)]
+    hall=[hist.count(i) for i in range(8)]
+    # Natural binomial baseline for 7 odd/even observations. This prevents the
+    # model from mistaking the expected 单3/单4 concentration for a discovered rule.
+    baseline=[1,7,21,35,35,21,7,1]
+    bsum=sum(baseline)
+    baseline=[x/bsum for x in baseline]
+    scores={}
+    for i in range(8):
+        recent=(h50[i]+1)/(len(hist[:50])+8)
+        long=(hall[i]+1)/(len(hist)+8)
+        expected=17*baseline[i]
+        # Current 17-group frequency is used as context, but both unusually high
+        # and unusually low states are bounded so random streaks cannot dominate.
+        z=max(-1.5,min(1.5,(cur[i]-expected)/(max(expected,1)**0.5)))
+        context=0.5 + 0.08*z
+        scores[i]=max(.0001, .45*recent + .40*long + .15*baseline[i]) * context
+    total=sum(scores.values()) or 1
+    norm={str(i):round(scores[i]/total*100,2) for i in range(8)}
+    pick=max(range(8), key=lambda i:(scores[i],-i))
+    ordered=sorted(cur)
+    rank=ordered.index(cur[pick])
+    mode='低频倾向' if rank<=2 else ('高频倾向' if rank>=5 else '居中倾向')
+    return {'single':pick,'scores':norm,'mode':mode,'sampleSize':17}
 
-    Uses only groups 1..17 from the current round.  It deliberately compares
-    current high/middle/low-frequency classes with historical, omission,
-    transition and fixed-position signals instead of blindly selecting the
-    most frequent current class.  Scores are model scores, not guaranteed odds.
-    """
-    sample=[int(groups[str(i)]['singleCount']) for i in range(1,18)
-            if str(i) in groups and groups[str(i)].get('singleCount') is not None]
-    if len(sample) < 17:
+
+def save_conclusion17_if_ready(date_str, period, groups, target20):
+    if groups.get('20') or any(str(i) not in groups for i in range(1,18)):
         return None
-    pick, scores = ai_analysis_from_data(groups, historical, relation, max_group=17)
-    if pick is None:
-        return None
-    counts={i:sample.count(i) for i in range(8)}
-    ordered=sorted(counts, key=lambda i:(counts[i],i))
-    low=set(ordered[:3]); high=set(ordered[-3:]); mid=set(range(8))-low-high
-    bucket='高频' if pick in high else ('低频' if pick in low else '居中')
-    return {'single':int(pick),'scores':scores,'sampleSize':17,'bucket':bucket,'frozen':True}
+    historical=get_historical_official_singles(date_str,period)
+    model=ai_conclusion17_from_data(groups,historical)
+    if not model: return None
+    key=f'{date_str}:{int(period):04d}'
+    conn=db_connect()
+    if conn is None: return model
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                # Create a shell row only when the 10-second AI row does not yet
+                # exist. ai_analysis uses the current 17-group tendency until the
+                # official 10-second lock overwrites it below.
+                cur.execute("SELECT 1 FROM ai_predictions WHERE period_key=%s",(key,))
+                exists=cur.fetchone() is not None
+                if exists:
+                    cur.execute("UPDATE ai_predictions SET conclusion17=COALESCE(conclusion17,%s), conclusion17_mode=COALESCE(conclusion17_mode,%s) WHERE period_key=%s",
+                                (model['single'],model['mode'],key))
+    finally: db_release(conn)
+    return model
 
 
 def calibrated_countdown_value():
@@ -989,8 +1030,9 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
     ai, scores=ai_analysis_from_data(groups,historical,relation)
     if ai is None: return None
     ranked_top3 = sorted(range(8), key=lambda i: (-float(scores.get(str(i), 0)), i))[:3]
-    conclusion17=ai17_conclusion_from_data(groups,historical,relation)
-    data_conclusion=int(conclusion17['single']) if conclusion17 else None
+    highest=stats.get('highest') or []
+    # A tied data conclusion is not forced into a false single choice.
+    data_conclusion=int(highest[0]['single']) if len(highest)==1 else None
     key=f'{date_str}:{int(period):04d}'
     conn=db_connect()
     if conn is None: return None
@@ -999,9 +1041,9 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,18)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT(period_key) DO NOTHING
-                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3)))
+                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3),int(stats.get('sampleSize') or 0)))
     finally: db_release(conn)
     return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True,'period':int(period),'lockCountdown':countdown}
 
@@ -1023,13 +1065,17 @@ def verify_prediction(date_str, period, official):
 def prediction_summary(date_str, period, groups, target20, official, ui_countdown=None):
     key=f'{date_str}:{int(period):04d}'
     now=time.time()
+    # Explicit UI=10 lock must be handled BEFORE any summary-cache return.
+    # Otherwise a request arriving within the cache TTL can silently miss the only lock event.
+    if official:
+        verify_prediction(date_str,period,official)
+    else:
+        save_prediction_if_ready(date_str,period,groups,target20,ui_countdown)
     with _ai_summary_cache_lock:
         cached=_ai_summary_cache.get('value') if _ai_summary_cache.get('key')==key else None
         cached_at=_ai_summary_cache.get('at',0)
-    if cached is not None and not official and now-cached_at < 1.0:
+    if cached is not None and not official and ui_countdown != 10 and now-cached_at < 1.0:
         return dict(cached)
-    if official: verify_prediction(date_str,period,official)
-    else: save_prediction_if_ready(date_str,period,groups,target20,ui_countdown)
     conn=db_connect(); row=None; agg=None; latest_verified=None
     if conn is not None:
         try:
@@ -1049,10 +1095,6 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
     historical=get_historical_official_singles(date_str,period)
     relation=group20_relation_model(date_str, period)
     live_ai,scores=ai_analysis_from_data(groups,historical,relation)
-    conclusion17=ai17_conclusion_from_data(groups,historical,relation)
-    if row and row.get('data_conclusion') is not None:
-        if conclusion17 is None: conclusion17={'single':int(row['data_conclusion']),'scores':{},'sampleSize':17,'bucket':'已锁定','frozen':True}
-        else: conclusion17['single']=int(row['data_conclusion'])
     ai_single=int(row['ai_analysis']) if row else live_ai
     frozen_top3=[]
     if row and row.get('prediction_top3') is not None:
@@ -1086,7 +1128,7 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
             'top3Hits':top3_hits,'top3HitRate':round(top3_hits/verified*100,2) if verified else None,'latestVerified':latest_result,
             'hitRate':round(hits/verified*100,2) if verified else None,
             'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,
-            'conclusion17':conclusion17,'sameAsGroup20':matches,'relationTop3':(relation.get('ranking') or [])[:3],'relationSample':relation.get('samplePeriods',0)}
+            'sameAsGroup20':matches,'relationTop3':(relation.get('ranking') or [])[:3],'relationSample':relation.get('samplePeriods',0)}
     with _ai_summary_cache_lock:
         _ai_summary_cache.update({'key':key,'at':time.time(),'value':dict(result)})
     return result
@@ -1208,6 +1250,11 @@ def draw():
         history = build_recent_official_history(date_str, period, 20)
         ui_countdown = request.args.get('ai_lock_countdown', type=int)
         ai_info = prediction_summary(date_str, period, groups, target20, official, ui_countdown)
+        historical_for_17 = get_historical_official_singles(date_str, period)
+        ai17 = ai_conclusion17_from_data(groups, historical_for_17)
+        if ai17 and not official:
+            try: save_conclusion17_if_ready(date_str, period, groups, target20)
+            except Exception: pass
         payload = {
             **state, 'platformPeriod': platform_period, 'currentPeriod': period_str, 'groupPeriodKey': f'{date_str}:{period_str}',
             'targetResultBlock': target20, 'officialReady': bool(official),
@@ -1216,7 +1263,7 @@ def draw():
             'resultBlockNumber': result_obj.get('blockNumber') if result_obj else None,
             'resultPlatformPeriod': result_obj.get('platformPeriod') if result_obj and result_obj.get('platformPeriod') else state.get('platformPeriod'),
             'result': result_obj, 'omission': omission, 'omissionSource': state.get('omissionSource', 'realtime state'), 'omissionHistorySample': state.get('omissionHistorySample', 0), 'resultHistory': history,
-            'aiAnalysis': ai_info,
+            'aiAnalysis': ai_info, 'aiConclusion17': ai17,
             'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
             'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
             'databaseStatus': 'connected', 'stale': False,
