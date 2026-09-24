@@ -9,21 +9,22 @@
 <body>
   <div class="app">
     <nav class="page-tabs" aria-label="页面导航">
-      <button class="active">Torn计算</button>
-      <button>历史数据</button>
+      <button id="tornTab" class="active">Torn计算</button>
+      <button id="historyTab">历史数据</button>
     </nav>
 
     <main class="content">
       <section class="card stats-card">
         <div class="section-title">数据统计</div>
         <div class="prob-grid">
-          <div class="prob-item">单0<small>--%</small></div>
-          <div class="prob-item">单1<small>--%</small></div>
-          <div class="prob-item">单2<small>--%</small></div>
-          <div class="prob-item">单3<small>--%</small></div>
-          <div class="prob-item">单4<small>--%</small></div>
-          <div class="prob-item">单5<small>--%</small></div>
-          <div class="prob-item">单6<small>--%</small></div>
+          <div class="prob-item">单3<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item">单4<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item">单5<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item">单2<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item">单0<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item">单7<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item">单1<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item">单6<small>次数：--次</small><small>概率：--%</small></div>
         </div>
         <div class="conclusion">结论：<strong>单--</strong> 为最高概率</div>
       </section>
@@ -64,5 +65,15 @@
       </section>
     </main>
   </div>
+<script>
+  const tornTab=document.getElementById('tornTab');
+  const historyTab=document.getElementById('historyTab');
+  function selectTab(active){
+    tornTab.classList.toggle('active', active===tornTab);
+    historyTab.classList.toggle('active', active===historyTab);
+  }
+  tornTab.addEventListener('click',()=>selectTab(tornTab));
+  historyTab.addEventListener('click',()=>selectTab(historyTab));
+</script>
 </body>
 </html>
