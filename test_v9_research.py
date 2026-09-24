@@ -10,7 +10,8 @@ from pathlib import Path
 # TRON, or PostgreSQL service.
 source = ast.parse(Path(__file__).with_name('app.py').read_text())
 names = {'_norm_scores', '_candidate_rank', 'research_model_performance',
-         '_hash_context_scores', '_relation_scores', 'v9_research_ensemble'}
+         '_hash_context_scores', '_relation_scores', 'v9_research_ensemble',
+         'should_poll_target'}
 module = ast.Module(body=[n for n in source.body if isinstance(n, ast.FunctionDef)
                           and n.name in names], type_ignores=[])
 scope = {'json': json, 'RealDictCursor': object()}
@@ -31,6 +32,13 @@ class Connection:
 
 
 class ResearchTests(unittest.TestCase):
+    def test_target_lookup_starts_at_g17_or_final_twelve_seconds(self):
+        should_poll=scope['should_poll_target']
+        self.assertFalse(should_poll(96,100,42))
+        self.assertTrue(should_poll(97,100,42))
+        self.assertTrue(should_poll(None,100,12))
+        self.assertFalse(should_poll(None,100,13))
+
     def test_no_evidence_uses_labelled_exploratory_weights(self):
         scope['db_connect'] = lambda: None
         result = scope['v9_research_ensemble']({}, [2, 3, 4])

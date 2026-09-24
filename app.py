@@ -62,7 +62,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.3.1-result-single-display-fix-1'
+MODEL_VERSION = 'v9.3.2-target-fetch-efficiency-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -79,6 +79,7 @@ _tron_cooldown_until = 0.0
 _tron_rate_diag = {'last429At': None, 'cooldownUntil': None, 'requestCount': 0, '429Count': 0}
 TRON_MIN_REQUEST_INTERVAL = 0.85
 TRON_429_COOLDOWN_SECONDS = 18.0
+TRON_PRO_API_KEY = os.environ.get('TRON_PRO_API_KEY', '').strip()
 
 # V8.1.5 event-driven prediction path. G17 publication emits a local event;
 # G20 has a pre-publication barrier that gives DB/RAM reconstruction one final
@@ -145,7 +146,10 @@ def _get_json(url, method='GET', payload=None):
     # Every public TRON request passes through one process-wide governor.
     _tron_rate_wait()
     data = json.dumps(payload).encode('utf-8') if payload is not None else None
-    req = Request(url, data=data, headers={'Content-Type': 'application/json', 'User-Agent': 'TornMonitor/2.2'}, method=method)
+    headers={'Content-Type': 'application/json', 'User-Agent': 'TornMonitor/2.2'}
+    if TRON_PRO_API_KEY and urlparse(url).hostname == 'api.trongrid.io':
+        headers['TRON-PRO-API-KEY']=TRON_PRO_API_KEY
+    req = Request(url, data=data, headers=headers, method=method)
     try:
         with urlopen(req, timeout=4) as resp:
             return json.loads(resp.read().decode('utf-8'))
@@ -313,8 +317,13 @@ def _g20_prepublication_barrier(date_str, period, target20):
     return ok
 
 
+def should_poll_target(latest_live, target, countdown):
+    """Resume direct target lookup at G17 or in the final 12 seconds."""
+    return (latest_live is not None and int(latest_live)>=int(target)-3) or int(countdown)<=12
+
+
 def target_result_fast_worker():
-    """Directly watch the known group-20 block, bypassing latest-block and DB paths."""
+    """Watch the target near its block slot, without polling a future height all minute."""
     last_target = None
     while True:
         worker_touch('target-result-fast')
@@ -327,20 +336,31 @@ def target_result_fast_worker():
             if target != last_target:
                 last_target = target
                 with _fast_diag_lock:
-                    _fast_diag.update({'target': target, 'provider': None, 'firstSeenAt': None, 'latencyMs': None, 'errors': {}})
+                    _fast_diag.update({'target': target, 'provider': None, 'firstSeenAt': None,
+                                       'latencyMs': None, 'barrierMs': None, 'errors': {}})
             if not ready:
+                with _live_blocks_lock:
+                    latest_live=_live_latest_number
+                # Start when G17 is visible, or within the last 12 seconds if
+                # the normal ingestion thread lags. Preserve the known target.
+                if not should_poll_target(latest_live,target,calibrated_countdown_value()):
+                    time.sleep(sleep_for)
+                    continue
                 try:
                     block, provider, latency_ms, errors = fetch_block_fast(target)
                     # G20 barrier: while the result is still private to this thread,
                     # use only RAM/PostgreSQL to durably lock any complete G17 snapshot.
+                    barrier_start=time.perf_counter()
                     _g20_prepublication_barrier(date_str, period, target)
+                    barrier_ms=round((time.perf_counter()-barrier_start)*1000,1)
                     publish_block_live(block)
                     enqueue_block_for_db(block)
                     with _fast_diag_lock:
                         _fast_diag.update({
                             'target': target, 'provider': provider,
                             'firstSeenAt': datetime.now(CN_TZ).isoformat(timespec='milliseconds'),
-                            'latencyMs': latency_ms, 'errors': errors
+                            'latencyMs': latency_ms, 'barrierMs': barrier_ms,
+                            'blockTime': block.get('timestamp'), 'errors': errors
                         })
                 except Exception as exc:
                     with _fast_diag_lock:
