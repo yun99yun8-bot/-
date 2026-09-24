@@ -1261,6 +1261,14 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
         cached_at=_ai_summary_cache.get('at',0)
     if cached is not None and not official and ui_countdown != 10 and now-cached_at < 1.0:
         return dict(cached)
+    # V5 second guarantee: summary itself self-heals a missing prediction row.
+    # A current-period 17/17 snapshot is enough; never create after group20.
+    if not official and all(str(i) in groups for i in range(1,18)):
+        try:
+            save_prediction_if_ready(date_str, period, groups, target20, force_backend=True)
+            flush_pending_ai_predictions()
+        except Exception:
+            pass
     conn=db_connect(); row=None; agg=None; latest_verified=None
     if conn is not None:
         try:
@@ -1280,7 +1288,10 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
     historical=get_historical_official_singles(date_str,period)
     relation=group20_relation_model(date_str, period)
     live_ai,scores=ai_analysis_from_data(groups,historical,relation)
-    ai_single=int(row['ai_analysis']) if row else live_ai
+    pending=None
+    with _pending_ai_lock:
+        pending=_pending_ai_predictions.get(key)
+    ai_single=int(row['ai_analysis']) if row else (int(pending['ai']) if pending else live_ai)
     frozen_top3=[]
     if row and row.get('prediction_top3') is not None:
         frozen_top3=row.get('prediction_top3') or []
@@ -1289,7 +1300,8 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
             except Exception: frozen_top3=[]
         frozen_top3=[int(x) for x in frozen_top3][:3]
     live_top3=sorted(range(8), key=lambda i:(-float(scores.get(str(i),0)),i))[:3] if scores else []
-    display_top3=frozen_top3 if frozen_top3 else live_top3
+    pending_top3=[int(x) for x in pending.get('top3',[])][:3] if pending else []
+    display_top3=frozen_top3 if frozen_top3 else (pending_top3 if pending_top3 else live_top3)
     verified=int(agg['verified'] or 0) if agg else 0; hits=int(agg['ai_hits'] or 0) if agg else 0
     dv=int(agg['data_verified'] or 0) if agg else 0; dh=int(agg['data_hits'] or 0) if agg else 0
     # Current-period values for the three historically highest-related positions.
@@ -1313,7 +1325,7 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
         hit_position=(pred.index(actual)+1) if actual in pred else None
         latest_result={'period':int(latest_verified['period_no']), 'top3':pred, 'actual':actual, 'hit':bool(hit_position), 'hitPosition':hit_position}
     result={'single':ai_single,'scores':scores,'historicalSample':len(historical),
-            'frozen':bool(row),'period':int(row['period_no']) if row else int(period),
+            'frozen':bool(row or pending),'period':int(row['period_no']) if row else int(period),
             'top3':display_top3,'verifiedSample':verified,'hits':hits,
             'top3Hits':top3_hits,'top3HitRate':round(top3_hits/verified*100,2) if verified else None,'latestVerified':latest_result,
             'hitRate':round(hits/verified*100,2) if verified else None,
@@ -1442,13 +1454,25 @@ def draw():
         ai_info = prediction_summary(date_str, period, groups, target20, official, ui_countdown)
         historical_for_17 = get_historical_official_singles(date_str, period)
         ai17 = ai_conclusion17_from_data(groups, historical_for_17, date_str, period, target20)
+
+        # V5 guarantee: once this exact period has strict groups 1..17 and
+        # group20 has not appeared, creation of the official prediction is
+        # attempted directly in the request path as well as by the worker.
+        # This removes dependence on a daemon thread getting scheduled in the
+        # short pre-result window.
+        if ai17 and not official:
+            try:
+                save_conclusion17_if_ready(date_str, period, groups, target20)
+            except Exception:
+                pass
+            try:
+                save_prediction_if_ready(date_str, period, groups, target20, force_backend=True)
+            except Exception:
+                pass
         if ai17:
             ai17 = {**ai17, 'period': period_str, 'platformPeriod': platform_period, 'periodKey': f'{date_str}:{period_str}',
                     'sourceGroups': list(range(1,18)),
                     'sourceBlocks': [int(groups[str(i)]['blockNumber']) for i in range(1,18)]}
-        if ai17 and not official:
-            try: save_conclusion17_if_ready(date_str, period, groups, target20)
-            except Exception: pass
         payload = {
             **state, 'platformPeriod': platform_period, 'currentPeriod': period_str, 'groupPeriodKey': f'{date_str}:{period_str}',
             'targetResultBlock': target20, 'officialReady': bool(official),
@@ -1462,7 +1486,10 @@ def draw():
             'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
             'databaseStatus': 'connected', 'stale': False,
             'storage': {'database': True, 'retentionDays': DB_RETENTION_DAYS, 'frontendSource': 'PostgreSQL + memory fallback'},
-            'debug': {'targetBlock': target20, 'fastTarget': dict(_fast_diag), 'aiPending': len(_pending_ai_predictions)}
+            'debug': {'targetBlock': target20, 'fastTarget': dict(_fast_diag),
+                      'aiPending': len(_pending_ai_predictions),
+                      'ai17Ready': bool(ai17),
+                      'aiFrozen': bool(ai_info.get('frozen')) if isinstance(ai_info, dict) else False}
         }
         with _draw_cache_lock:
             _draw_cache = dict(payload)
