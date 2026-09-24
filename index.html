@@ -304,6 +304,12 @@
   }
   function render(data){
     var rp=String(data.currentPeriod||'').padStart(4,'0');
+    // A reconnect response may intentionally preserve the last official result,
+    // but current-period analytics must never be painted from a prior minute.
+    if(data.stale && data.groupPeriodKey && String(data.groupPeriodKey).slice(-4)!==rp){
+      data.groups=[]; data.dataStats={sampleSize:0,stats:[],highest:[]};
+      data.aiConclusion17=null;
+    }
     if(lastRenderPeriod && rp && lastRenderPeriod!==rp){ lastGoodAI=null; lastGoodAIPeriod=''; aiLockConfirmedMinute=''; }
     if(rp) lastRenderPeriod=rp;
     var status=document.getElementById('homeLiveStatus');
@@ -365,7 +371,7 @@
     }
   }
   loadDraw();
-  window.setInterval(loadDraw,350); // realtime pickup without flooding the backend
+  window.setInterval(loadDraw,500); // responsive pickup with lower overlap/load on Render
   tickCountdown(); window.setInterval(tickCountdown,200);
 })();
 </script>

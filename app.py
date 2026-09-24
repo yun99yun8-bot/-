@@ -709,7 +709,9 @@ def collect_groups_live(date_str, period):
         if row:
             nums = row['numbers'] if isinstance(row['numbers'], list) else json.loads(row['numbers'])
             groups[str(g)] = {
-                'group': g, 'blockNumber': bn, 'block': row['block_hash'],
+                'group': g, 'period': f'{int(period):04d}', 'periodKey': period_key,
+                'target20': int(target20),
+                'blockNumber': bn, 'block': row['block_hash'],
                 'numbers': nums, 'singleCount': int(row['single_count'])
             }
     return groups, target20
@@ -1385,11 +1387,25 @@ def draw():
         with _draw_cache_lock:
             cached = dict(_draw_cache) if isinstance(_draw_cache, dict) else None
         if cached:
+            cached_period = str(cached.get('currentPeriod') or '').zfill(4)
+            crossed_period = bool(cached_period and cached_period != period_str)
             cached.update({
                 'ok': True, 'databaseStatus': 'reconnecting', 'stale': True,
                 'databaseError': type(exc).__name__,
                 'currentPeriod': period_str, 'platformPeriod': platform_period
             })
+            if crossed_period:
+                # Keep the last confirmed official result visible, but never
+                # masquerade prior-period live groups/statistics/AI as the new period.
+                cached['officialReady'] = False
+                cached['groupPeriodKey'] = f'{date_str}:{period_str}'
+                cached['groups'] = []
+                cached['dataStats'] = stats_from_groups({})
+                cached['aiConclusion17'] = None
+                cached['aiAnalysis'] = {
+                    'period': period_str, 'frozen': False, 'single': None,
+                    'scores': {}, 'top3': [], 'relationTop3': []
+                }
             return jsonify(cached)
         # First boot with no in-memory payload: fall back to the last persisted
         # state file rather than returning a 502 page to the browser.
