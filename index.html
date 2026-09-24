@@ -1,48 +1,119 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Torn计算</title>
-<link rel="stylesheet" href="style.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>TRON 区块开奖统计面板</title>
+  <link rel="stylesheet" href="./style.css">
 </head>
 <body>
-  <div class="app">
+  <main class="container">
     <header class="topbar">
-      <div class="brand">Torn计算</div>
-      <div class="top-spacer"></div>
+      <div>
+        <h1>TRON 区块统计面板</h1>
+        <p class="muted">实时读取 TRON 最新区块，并按你提供的规则计算与记录结果。</p>
+      </div>
+      <div class="status-wrap">
+        <span id="statusDot" class="dot"></span>
+        <span id="statusText">连接中…</span>
+      </div>
     </header>
 
-    <nav class="page-tabs" aria-label="页面导航">
-      <button class="active">Torn计算</button>
-      <button>历史数据</button>
-    </nav>
+    <section class="grid cards">
+      <article class="card">
+        <div class="label">当前区块高度</div>
+        <div id="blockNumber" class="value">—</div>
+      </article>
+      <article class="card">
+        <div class="label">区块时间</div>
+        <div id="blockTime" class="value small">—</div>
+      </article>
+      <article class="card">
+        <div class="label">自动刷新</div>
+        <div id="countdown" class="value">5s</div>
+      </article>
+      <article class="card">
+        <div class="label">历史记录</div>
+        <div id="recordCount" class="value">0</div>
+      </article>
+    </section>
 
-    <main class="content">
-      <section class="card hero-card">
-        <div class="section-title">开奖结果</div>
-        <div class="placeholder large">等待数据</div>
-      </section>
+    <section class="card">
+      <div class="section-title">
+        <h2>最新区块</h2>
+        <button id="refreshBtn" class="button">立即刷新</button>
+      </div>
+      <div class="hash" id="blockHash">—</div>
+      <div class="meta-row">
+        <span>数据源：TRON FullNode</span>
+        <span id="sourceInfo">wallet/getnowblock</span>
+      </div>
+    </section>
 
-      <section class="card">
-        <div class="section-title">遗漏统计</div>
-        <div class="omission-grid">
-          <div class="stat">单0<small>--期</small></div>
-          <div class="stat">单1<small>--期</small></div>
-          <div class="stat">单2<small>--期</small></div>
-          <div class="stat">单3<small>--期</small></div>
-          <div class="stat">单4<small>--期</small></div>
-          <div class="stat">单5<small>--期</small></div>
-          <div class="stat">单6<small>--期</small></div>
-          <div class="stat">单7<small>--期</small></div>
+    <section class="card result-card">
+      <div class="section-title">
+        <h2>规则计算</h2>
+        <span class="tag">仅作历史数据统计</span>
+      </div>
+
+      <div class="result-grid">
+        <div>
+          <div class="label">从右往左提取的 7 个字母</div>
+          <div id="letters" class="mono-box">—</div>
         </div>
-      </section>
+        <div>
+          <div class="label">从右往左提取的 7 个数字</div>
+          <div id="digits" class="mono-box">—</div>
+        </div>
+      </div>
 
-      <section class="card">
-        <div class="section-title">20期区块数据</div>
-        <div class="placeholder table-placeholder">等待数据</div>
-      </section>
-    </main>
-  </div>
+      <div class="label result-label">组合原始号码</div>
+      <div id="rawPairs" class="numbers">—</div>
+
+      <div class="label result-label">A=0、B=1、C=2、D=3、E=4 后的号码</div>
+      <div id="finalPairs" class="numbers">—</div>
+
+      <div id="ruleNote" class="note"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">
+        <h2>数字统计</h2>
+        <select id="windowSelect" class="select">
+          <option value="50">最近 50 条</option>
+          <option value="100" selected>最近 100 条</option>
+          <option value="500">最近 500 条</option>
+          <option value="all">全部</option>
+        </select>
+      </div>
+      <div id="stats" class="stats-grid"></div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">
+        <h2>历史记录</h2>
+        <button id="clearBtn" class="button danger">清空本机记录</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>区块</th>
+              <th>时间</th>
+              <th>Hash</th>
+              <th>7组号码</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      <p>说明：本页面只读取公开区块数据并按既定规则做历史计算/统计，不提供下一期结果预测或下注建议。</p>
+      <p>数据保存在当前浏览器 localStorage；如果需要多人共享历史记录，应接入数据库后端。</p>
+    </footer>
+  </main>
+  <script src="./app.js"></script>
 </body>
 </html>
