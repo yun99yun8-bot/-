@@ -598,6 +598,39 @@ def tron_ingest_worker():
         # result publication to database latency.
         time.sleep(0.5)
 
+def ai_prediction_worker():
+    """Own the complete AI lifecycle independently of any browser.
+
+    It locks once group 17 is available and group 20 is not, then verifies
+    automatically when group 20 arrives. Repeated calls are idempotent.
+    """
+    last_verified_key=None
+    while True:
+        try:
+            date_str,period,_,_=current_period()
+            groups,target20=collect_groups_live(date_str,period)
+            official=groups.get('20')
+            key=f'{date_str}:{int(period):04d}'
+            # As soon as the strict 17-group evidence is complete, persist the
+            # conclusion and a prediction row. This guarantees a pre-result row.
+            if not official and all(str(i) in groups for i in range(1,18)):
+                try: save_conclusion17_if_ready(date_str,period,groups,target20)
+                except Exception: pass
+                try: save_prediction_if_ready(date_str,period,groups,target20,force_backend=True)
+                except Exception: pass
+            if official and last_verified_key != key:
+                try:
+                    verify_prediction(date_str,period,official)
+                    last_verified_key=key
+                    with _ai_summary_cache_lock:
+                        _ai_summary_cache.update({'key':None,'at':0,'value':None})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        time.sleep(0.75)
+
+
 def start_worker_once():
     global _worker_started
     if not DATABASE_URL or psycopg2 is None:
@@ -609,6 +642,7 @@ def start_worker_once():
         threading.Thread(target=db_writer_worker, name='db-writer', daemon=True).start()
         threading.Thread(target=tron_ingest_worker, name='tron-ingest', daemon=True).start()
         threading.Thread(target=target_result_fast_worker, name='target-result-fast', daemon=True).start()
+        threading.Thread(target=ai_prediction_worker, name='ai-prediction', daemon=True).start()
 
 
 def collect_period_groups(date_str, period, latest_number, state):
@@ -1107,33 +1141,31 @@ def calibrated_countdown_value():
     return 60 if sec == 0 else 60 - sec
 
 
-def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None):
-    # The official AI decision is made exactly once in the final 10 seconds.
-    # Before that we may calculate live signals internally, but they are not persisted as the prediction.
-    # The browser countdown is the single source of truth for the 10-second lock.
-    # Only an explicit UI trigger at displayed 10 may create the official prediction.
+def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None, force_backend=False):
+    """Idempotently persist one pre-result prediction for the period.
+
+    The backend worker is authoritative. The UI countdown remains only a
+    display/extra trigger, so closing the page can no longer lose a prediction.
+    """
     countdown = int(ui_countdown) if ui_countdown is not None else None
-    if countdown != 10:
+    if not force_backend and countdown != 10:
+        return None
+    if groups.get('20'):
         return None
     stats=stats_from_groups(groups)
-    # Lock with whatever current-period evidence is available at UI 10.
-    # Do not miss the lock merely because one live group arrived late.
-    if int(stats.get('sampleSize') or 0) < 1 or groups.get('20'):
+    if int(stats.get('sampleSize') or 0) < 1:
         return None
     historical=get_historical_official_singles(date_str, period)
     relation=group20_relation_model(date_str, period)
-    ai, scores=ai_analysis_from_data(groups,historical,relation)
+    ai,scores=ai_analysis_from_data(groups,historical,relation)
     if ai is None: return None
-    ranked_top3 = sorted(range(8), key=lambda i: (-float(scores.get(str(i), 0)), i))[:3]
+    ranked_top3=sorted(range(8),key=lambda i:(-float(scores.get(str(i),0)),i))[:3]
     highest=stats.get('highest') or []
-    # A tied data conclusion is not forced into a false single choice.
     data_conclusion=int(highest[0]['single']) if len(highest)==1 else None
-    # Capture the strict current-period 1..17 conclusion in the same pre-result
-    # prediction row. Group 20 is never used to create this conclusion.
-    c17 = ai_conclusion17_from_data(groups, historical, date_str, period, target20)
+    c17=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
     key=f'{date_str}:{int(period):04d}'
     conn=db_connect()
-    if conn is None: return None
+    if conn is None:return None
     try:
         with conn:
             with conn.cursor() as cur:
@@ -1147,10 +1179,13 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
                       sample_size=GREATEST(COALESCE(ai_predictions.sample_size,0),EXCLUDED.sample_size),
                       conclusion17=COALESCE(ai_predictions.conclusion17,EXCLUDED.conclusion17),
                       conclusion17_mode=COALESCE(ai_predictions.conclusion17_mode,EXCLUDED.conclusion17_mode)
-                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3),int(stats.get('sampleSize') or 0),
-                       c17.get('single') if c17 else None, c17.get('mode') if c17 else None))
+                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3),
+                     int(stats.get('sampleSize') or 0),c17.get('single') if c17 else None,c17.get('mode') if c17 else None))
     finally: db_release(conn)
-    return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True,'period':int(period),'lockCountdown':countdown}
+    with _ai_summary_cache_lock:
+        _ai_summary_cache.update({'key':None,'at':0,'value':None})
+    return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True,
+            'period':int(period),'lockCountdown':countdown,'lockSource':'backend' if force_backend else 'ui'}
 
 
 def verify_prediction(date_str, period, official):
