@@ -38,3 +38,10 @@ AI statistical analysis module:
 - Freezes each prediction before group 20 is available and verifies it after group 20, so hit-rate tracking is not rewritten after the outcome.
 - Shows which groups 1-19 have the same 单X result as group 20.
 - Accuracy begins accumulating after this version is deployed; prior periods are used as historical features but are not falsely counted as pre-outcome predictions.
+
+本版整理：
+- 开奖结果按期锁定：同一期7个号码/单几/区块只接受一次正式第20组，不随1秒轮询跳动。
+- 开奖结果旁加入北京时间60秒倒计时，仅显示60..00；00时主动刷新正式结果。
+- “AI评分前三”改为“本期AI预测前三”：当前1-19组实时数据 + 历史正式结果 + 固定组次对第20组的历史关联共同评分。
+- 增加“历史高关联组次”前三，显示固定组次与第20组单几一致的历史匹配率。
+- 1200->1201 的 +18 区块偏移继续保留。

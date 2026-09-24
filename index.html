@@ -29,7 +29,8 @@
         </div>
         <div class="conclusion" id="statsConclusion">结论：等待第1～18组数据</div>
         <div class="conclusion ai-conclusion" id="aiConclusion">AI分析：等待数据</div>
-        <div class="stats-note" id="aiTop3">AI评分前三：等待数据</div>
+        <div class="stats-note" id="aiTop3">本期AI预测前三：等待数据</div>
+        <div class="stats-note" id="relationTop3">历史高关联组次：等待数据</div>
         <div class="stats-note" id="aiAllScores">单0～单7评分：等待数据</div>
         <div class="stats-note" id="aiAccuracy">AI历史验证：暂无已验证样本</div>
         <div class="stats-note" id="group20Matches">与第20组相同：等待第20组</div>
@@ -37,7 +38,7 @@
 
       <section class="card hero-card">
         <div class="result-head">
-          <div class="section-title">开奖结果</div>
+          <div class="section-title result-title-line">开奖结果 <span class="countdown" id="countdown">--</span></div>
           <div class="draw-meta">
             <span class="single-badge">单<strong id="singleValue">--</strong></span>
             <span class="period-badge">第 <strong id="periodValue">0000000000</strong> 期<br><small>区块：<span id="blockValue">--</span></small></span>
@@ -135,7 +136,10 @@
     var bestScore=(ai.single!=null && scoreMap[String(ai.single)]!=null)?Number(scoreMap[String(ai.single)]).toFixed(2):'--';
     text('aiConclusion',ai.single!=null?'AI分析：单'+ai.single+'｜评分 '+bestScore+'%':'AI分析：等待数据');
     var topParts=[]; for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
-    text('aiTop3',topParts.length?'AI评分前三：'+topParts.join('　'):'AI评分前三：等待数据');
+    text('aiTop3',topParts.length?'本期AI预测前三：'+topParts.join('　'):'本期AI预测前三：等待数据');
+    var rel=Array.isArray(ai.relationTop3)?ai.relationTop3:[], relParts=[];
+    for(var ri=0;ri<rel.length;ri++) relParts.push('第'+rel[ri].group+'组 '+Number(rel[ri].matchRate||0).toFixed(2)+'%');
+    text('relationTop3',relParts.length?'历史高关联组次：'+relParts.join('　'):'历史高关联组次：等待数据');
     var allParts=[]; for(var ax=0;ax<=7;ax++) allParts.push('单'+ax+' '+Number(scoreMap[String(ax)]||0).toFixed(1)+'%');
     text('aiAllScores','单0～单7评分：'+allParts.join('｜'));
     var rate=ai.hitRate!=null?Number(ai.hitRate).toFixed(2)+'%':'--';
@@ -180,21 +184,62 @@
       html+='<div class="history20-item"><strong>'+p+'</strong><small>'+(r.singleCount!=null?'单'+r.singleCount:'--')+'</small></div>';}
     box.innerHTML=html;
   }
+  var fixedResult=null;
+  var lastAcceptedResultPeriod='';
+  function candidateResult(data){
+    var r=(data.result&&Array.isArray(data.result.numbers))?data.result:null;
+    var nums=r?r.numbers:(Array.isArray(data.resultNumbers)?data.resultNumbers:[]);
+    var period=(r&&r.platformPeriod)||data.resultPlatformPeriod||'';
+    var single=r&&r.singleCount!=null?r.singleCount:data.resultSingleCount;
+    var block=r&&r.blockNumber!=null?r.blockNumber:data.resultBlockNumber;
+    if(!Array.isArray(nums)||nums.length!==7||single==null||block==null||!period)return null;
+    return {period:String(period),single:single,block:block,numbers:nums.slice(0,7)};
+  }
+  function paintFixedResult(r){
+    if(!r)return;
+    text('periodValue',r.period); text('singleValue',r.single); text('blockValue',r.block);
+    var boxes=document.querySelectorAll('[data-result]');
+    for(var i=0;i<boxes.length;i++) boxes[i].textContent=r.numbers[i]!=null?r.numbers[i]:'--';
+  }
+  function renderFixedResult(data){
+    var c=candidateResult(data);
+    if(!fixedResult && c){ fixedResult=c; lastAcceptedResultPeriod=c.period; paintFixedResult(fixedResult); return; }
+    // A period's official result is immutable. Never repaint the seven numbers
+    // during ordinary 1-second polling. Accept only a genuinely newer official
+    // period after the backend has confirmed group 20.
+    if(c && data.officialReady && c.period!==lastAcceptedResultPeriod){
+      fixedResult=c; lastAcceptedResultPeriod=c.period; paintFixedResult(fixedResult);
+    }
+  }
   function render(data){
     renderStats(data); renderGroups(data.groups||[],data.groupPeriodKey||data.currentPeriod||data.period||''); renderOmission(data); renderHistory(data);
-    var result=(data.result&&Array.isArray(data.result.numbers))?data.result:null;
-    var nums=result?result.numbers:(Array.isArray(data.resultNumbers)?data.resultNumbers:(Array.isArray(data.numbers)?data.numbers:[]));
-    text('periodValue',(result&&result.platformPeriod)||data.resultPlatformPeriod||data.platformPeriod||data.currentPeriod||data.period||'0000000000');
-    text('singleValue',result&&result.singleCount!=null?result.singleCount:(data.resultSingleCount!=null?data.resultSingleCount:data.singleCount));
-    text('blockValue',result&&result.blockNumber!=null?result.blockNumber:(data.resultBlockNumber!=null?data.resultBlockNumber:data.blockNumber));
-    var boxes=document.querySelectorAll('[data-result]'); for(var i=0;i<boxes.length;i++)boxes[i].textContent=nums[i]!=null?nums[i]:'--';
+    renderFixedResult(data);
   }
   function loadDraw(){
     var xhr=new XMLHttpRequest(); xhr.open('GET','/api/draw?t='+new Date().getTime(),true); xhr.setRequestHeader('Cache-Control','no-cache');
     xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}};
     xhr.send(null);
   }
-  loadDraw(); window.setInterval(loadDraw,1000);
+  var lastZeroMinute='';
+  function beijingParts(){
+    var now=new Date();
+    var ms=now.getTime()+now.getTimezoneOffset()*60000+8*3600000;
+    return new Date(ms);
+  }
+  function tickCountdown(){
+    var b=beijingParts(), sec=b.getSeconds(), ms=b.getMilliseconds();
+    // Show 00 briefly at the exact Beijing minute boundary, then start 60..59..
+    var value=(sec===0 && ms<650)?0:(sec===0?60:60-sec);
+    text('countdown',value<10?'0'+value:value);
+    var minuteKey=b.getFullYear()+'-'+(b.getMonth()+1)+'-'+b.getDate()+' '+b.getHours()+':'+b.getMinutes();
+    if(value===0 && lastZeroMinute!==minuteKey){
+      lastZeroMinute=minuteKey;
+      loadDraw(); // official-result refresh at 00
+    }
+  }
+  loadDraw();
+  window.setInterval(loadDraw,1000); // groups/AI remain live
+  tickCountdown(); window.setInterval(tickCountdown,200);
 })();
 </script>
 </body>

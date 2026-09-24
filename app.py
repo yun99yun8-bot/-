@@ -42,6 +42,8 @@ _draw_cache = None
 _draw_cache_lock = threading.Lock()
 _live_blocks = {}
 _live_blocks_lock = threading.Lock()
+_relation_cache = {'key': None, 'at': 0, 'value': None}
+_relation_cache_lock = threading.Lock()
 
 
 def current_period():
@@ -559,7 +561,66 @@ def get_historical_official_singles(date_str, period, limit=720):
         db_release(conn)
 
 
-def ai_analysis_from_data(groups, historical):
+def group20_relation_model(date_str, period, lookback=120):
+    """Historical position model: which groups 1-19 have matched group 20.
+
+    Uses completed prior periods only.  For each fixed group position it stores
+    both the overall match rate and the conditional distribution of group-20
+    single-count given that position's observed single-count.  Cached briefly
+    so the 1-second frontend polling does not hammer PostgreSQL.
+    """
+    cache_key = f'{date_str}:{int(period):04d}'
+    now = time.time()
+    with _relation_cache_lock:
+        if _relation_cache.get('key') == cache_key and _relation_cache.get('value') is not None and now - _relation_cache.get('at', 0) < 20:
+            return _relation_cache['value']
+
+    periods = []
+    idx_now = period_index(date_str, period)
+    wanted = []
+    for off in range(1, int(lookback) + 1):
+        idx = idx_now - off
+        ordinal, zero = divmod(idx, 1440)
+        d = date.fromordinal(ordinal)
+        pno = zero + 1
+        target = period_target_block(d.strftime('%Y-%m-%d'), pno)
+        bns = [target - (20-g) for g in range(1,21)]
+        periods.append((d.strftime('%Y-%m-%d'), pno, target, bns))
+        wanted.extend(bns)
+    try:
+        rows = get_db_blocks(wanted)
+    except Exception:
+        rows = {}
+
+    pos = {i: {'matches':0, 'sample':0, 'conditional': {x:[0]*8 for x in range(8)}} for i in range(1,20)}
+    complete = 0
+    for _, _, target, bns in periods:
+        r20 = rows.get(target)
+        if not r20:
+            continue
+        actual = int(r20['single_count'])
+        complete += 1
+        for g in range(1,20):
+            row = rows.get(bns[g-1])
+            if not row:
+                continue
+            observed = int(row['single_count'])
+            pos[g]['sample'] += 1
+            if observed == actual:
+                pos[g]['matches'] += 1
+            pos[g]['conditional'][observed][actual] += 1
+    ranking = []
+    for g in range(1,20):
+        st = pos[g]
+        rate = (st['matches']/st['sample']*100.0) if st['sample'] else 0.0
+        ranking.append({'group':g,'matches':st['matches'],'sample':st['sample'],'matchRate':round(rate,2)})
+    ranking.sort(key=lambda x:(-x['matchRate'],-x['sample'],x['group']))
+    value = {'samplePeriods':complete,'positions':pos,'ranking':ranking}
+    with _relation_cache_lock:
+        _relation_cache.update({'key':cache_key,'at':now,'value':value})
+    return value
+
+def ai_analysis_from_data(groups, historical, relation=None):
     """Adaptive 8-class scoring model.
 
     Every class 单0..单7 is scored independently.  The model combines:
@@ -572,7 +633,7 @@ def ai_analysis_from_data(groups, historical):
     The returned percentages are normalized *model scores*, not guaranteed
     probabilities.  No class is artificially promoted merely for variety.
     """
-    current = [int(groups[str(i)]['singleCount']) for i in range(1, 19)
+    current = [int(groups[str(i)]['singleCount']) for i in range(1, 20)
                if str(i) in groups and groups[str(i)].get('singleCount') is not None]
     if not current:
         return None, {}
@@ -616,6 +677,26 @@ def ai_analysis_from_data(groups, historical):
                 transition_n += 1
     trans_d = [(transition[i] + 1.0) / (transition_n + 8.0) for i in range(8)]
 
+    relation_signal = [1.0/8.0] * 8
+    if relation and relation.get('positions'):
+        votes = [1.0] * 8
+        weight_total = 8.0
+        for g in range(1,20):
+            row = groups.get(str(g))
+            st = relation['positions'].get(g) if isinstance(relation.get('positions'), dict) else None
+            if not row or not st or row.get('singleCount') is None:
+                continue
+            observed = int(row['singleCount'])
+            cond = st.get('conditional', {}).get(observed, [0]*8)
+            n = sum(cond)
+            # fixed-position historical reliability; Laplace-smoothed
+            w = min(2.0, 0.5 + st.get('sample',0)/80.0)
+            for i in range(8):
+                votes[i] += w * ((cond[i] + 1.0) / (n + 8.0))
+            weight_total += w
+        total_votes = sum(votes) or 1.0
+        relation_signal = [v/total_votes for v in votes]
+
     raw = {}
     for i in range(8):
         # Positive momentum means the class is appearing more in the recent
@@ -628,9 +709,10 @@ def ai_analysis_from_data(groups, historical):
             0.15 * d50[i] +
             0.12 * d100[i] +
             0.12 * dall[i] +
-            0.11 * trans_d[i] +
-            0.05 * omit_signal +
-            0.03 * (0.5 + momentum)
+            0.09 * trans_d[i] +
+            0.18 * relation_signal[i] +
+            0.04 * omit_signal +
+            0.02 * (0.5 + momentum)
         )
 
     total = sum(raw.values()) or 1.0
@@ -644,7 +726,8 @@ def save_prediction_if_ready(date_str, period, groups, target20):
     if stats.get('sampleSize') != 18 or groups.get('20'):
         return None
     historical=get_historical_official_singles(date_str, period)
-    ai, scores=ai_analysis_from_data(groups,historical)
+    relation=group20_relation_model(date_str, period)
+    ai, scores=ai_analysis_from_data(groups,historical,relation)
     if ai is None: return None
     highest=stats.get('highest') or []
     # A tied data conclusion is not forced into a false single choice.
@@ -694,7 +777,8 @@ def prediction_summary(date_str, period, groups, target20, official):
                     FROM ai_predictions"""); agg=cur.fetchone()
         finally: db_release(conn)
     historical=get_historical_official_singles(date_str,period)
-    live_ai,scores=ai_analysis_from_data(groups,historical)
+    relation=group20_relation_model(date_str, period)
+    live_ai,scores=ai_analysis_from_data(groups,historical,relation)
     ai_single=int(row['ai_analysis']) if row else live_ai
     verified=int(agg['verified'] or 0) if agg else 0; hits=int(agg['ai_hits'] or 0) if agg else 0
     dv=int(agg['data_verified'] or 0) if agg else 0; dh=int(agg['data_hits'] or 0) if agg else 0
@@ -706,7 +790,7 @@ def prediction_summary(date_str, period, groups, target20, official):
             'frozen':bool(row),'verifiedSample':verified,'hits':hits,
             'hitRate':round(hits/verified*100,2) if verified else None,
             'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,
-            'sameAsGroup20':matches}
+            'sameAsGroup20':matches,'relationTop3':(relation.get('ranking') or [])[:3],'relationSample':relation.get('samplePeriods',0)}
 
 def read_state():
     try:

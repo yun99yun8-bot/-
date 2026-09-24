@@ -80,3 +80,7 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .group-table tbody tr.new-group-row{background:#fff1b8;box-shadow:inset 4px 0 0 #f0a500}
 .group-table tbody tr.new-group-row td{font-weight:800}
 .ai-conclusion{margin-top:8px;font-weight:800}.stats-note#aiAccuracy,.stats-note#group20Matches{margin-top:6px}
+
+/* 北京时间60秒倒计时：开奖结果只在确认新一期第20组后切换一次 */
+.result-title-line{display:flex;align-items:center;gap:8px}
+.countdown{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:28px;padding:0 7px;border-radius:9px;background:#fff3e8;color:#c45a16;font-size:17px;font-weight:900;font-variant-numeric:tabular-nums}
