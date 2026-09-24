@@ -59,12 +59,20 @@ _ai_summary_cache = {'key': None, 'at': 0, 'value': None}
 _ai_summary_cache_lock = threading.Lock()
 _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
-_runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0}
+_runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v7-ensemble-1'
+MODEL_VERSION = 'v7.3-stable-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
+
+
+def worker_touch(name, error=None):
+    now=datetime.now(CN_TZ).isoformat(timespec='seconds')
+    with _runtime_health_lock:
+        _runtime_health.setdefault('workerHeartbeats', {})[name]=now
+        if error is not None:
+            _runtime_health.setdefault('workerErrors', {})[name]=str(error)[:300]
 
 
 def current_period():
@@ -196,6 +204,7 @@ def target_result_fast_worker():
     """Directly watch the known group-20 block, bypassing latest-block and DB paths."""
     last_target = None
     while True:
+        worker_touch('target-result-fast')
         sleep_for = 0.20
         try:
             date_str, period, _, _ = current_period()
@@ -472,6 +481,7 @@ def enqueue_block_for_db(block):
 def db_writer_worker():
     """Database writes are deliberately off the realtime result path."""
     while True:
+        worker_touch('db-writer')
         block = _db_write_queue.get()
         try:
             for delay in (0, 1, 3):
@@ -605,6 +615,7 @@ def tron_ingest_worker():
     last_seen = None
     last_cleanup = 0
     while True:
+        worker_touch('tron-ingest')
         try:
             latest = fetch_latest_block()
             end = int(latest['number'])
@@ -713,6 +724,7 @@ def smart_db_worker():
     """Continuously materialize current period and repair recent holes."""
     last_repair=0
     while True:
+        worker_touch('smart-db')
         try:
             ds,p,_,_=current_period()
             groups,target=collect_groups_live(ds,p)
@@ -731,6 +743,7 @@ def ai_prediction_worker():
     """Server-owned AI lifecycle; no browser request is required."""
     last_verified_key=None
     while True:
+        worker_touch('ai-prediction')
         try:
             flush_pending_ai_predictions()
             date_str,period,_,_=current_period()
@@ -1768,8 +1781,17 @@ def system_health():
             cur.execute("SELECT COUNT(*) FROM period_groups"); counts['periodGroups']=int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM ai_predictions"); counts['predictions']=int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM system_events"); counts['events']=int(cur.fetchone()[0])
+        runtime=dict(_runtime_health)
+        hb=dict(runtime.get('workerHeartbeats') or {})
+        now=datetime.now(CN_TZ); worker_status={}
+        for name,stamp in hb.items():
+            try:
+                age=max(0.0,(now-datetime.fromisoformat(stamp)).total_seconds())
+            except Exception: age=999999
+            worker_status[name]={'lastHeartbeat':stamp,'ageSeconds':round(age,1),'healthy':age < 12}
+        runtime['workers']=worker_status
         return jsonify({'ok':True,'period':ps,'platformPeriod':platform,'modelVersion':MODEL_VERSION,
-                        'counts':counts,'runtime':dict(_runtime_health)})
+                        'counts':counts,'runtime':runtime})
     except Exception as exc:
         return jsonify({'ok':False,'error':type(exc).__name__,'runtime':dict(_runtime_health)}),503
     finally:

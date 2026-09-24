@@ -171,3 +171,12 @@ AI statistical analysis module:
 - iOS从锁屏/后台恢复时，通过 visibilitychange/pageshow/focus/online 立即重新同步当前秒数、正式结果和主数据。
 - 倒计时每次直接按北京时间计算，不从锁屏前旧秒数继续。
 - 注意：如果托管平台本身把整个Web Service休眠/停机，任何进程内后台线程都会一起停止；真正24/7独立运行需要部署环境保持服务常驻。
+
+## V7.3 长期稳定修复
+- 根据线上证据确认：服务器在页面看似停止时仍持续从0075推进到0076，预测78→79、periodGroups 291→311，因此重点修复前端长期刷新链路。
+- 前端增加双请求 watchdog：/api/draw 与 /api/result-fast 任一路超过9秒无成功响应，自动中止旧请求并完整重连。
+- iOS 锁屏/切后台恢复、pageshow、online、focus 都强制重新同步服务器当前状态。
+- 倒计时始终根据当前北京时间重新计算，不依赖浏览器“上一秒”的计数。
+- AI/历史接口和正式开奖结果继续完全分离，AI请求卡住不能阻止正式结果更新。
+- system-health 新增 db-writer、tron-ingest、target-result-fast、ai-prediction、smart-db 五条后台任务心跳及 ageSeconds/healthy 状态。
+- 模型版本标记为 v7.3-stable-1。

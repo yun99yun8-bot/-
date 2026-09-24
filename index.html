@@ -323,6 +323,8 @@
   }
   var drawRequestBusy=false;
   var pendingAILock=false;
+  var activeDrawXHR=null, activeFastXHR=null;
+  var lastDrawSuccess=Date.now(), lastFastSuccess=Date.now();
   function loadDraw(aiLockCountdown){
     if(aiLockCountdown===10) pendingAILock=true;
     if(drawRequestBusy)return;
@@ -331,10 +333,10 @@
     drawRequestBusy=true;
     var url='/api/draw?t='+new Date().getTime();
     if(sendAILock) url+='&ai_lock_countdown=10';
-    var xhr=new XMLHttpRequest(); xhr.open('GET',url,true); xhr.setRequestHeader('Cache-Control','no-cache'); xhr.timeout=5000;
+    var xhr=new XMLHttpRequest(); activeDrawXHR=xhr; xhr.open('GET',url,true); xhr.setRequestHeader('Cache-Control','no-cache'); xhr.timeout=5000;
     var finished=false;
-    function finishRequest(){ if(finished)return; finished=true; drawRequestBusy=false; if(pendingAILock){setTimeout(function(){loadDraw(10);},0);} }
-    xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; finishRequest(); if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}};
+    function finishRequest(){ if(finished)return; finished=true; if(activeDrawXHR===xhr)activeDrawXHR=null; drawRequestBusy=false; if(pendingAILock){setTimeout(function(){loadDraw(10);},0);} }
+    xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; finishRequest(); if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok){lastDrawSuccess=Date.now();render(data);}}catch(e){}};
     xhr.onerror=finishRequest; xhr.ontimeout=finishRequest; xhr.onabort=finishRequest;
     xhr.send(null);
   }
@@ -374,10 +376,10 @@
   var fastBusy=false;
   function loadFastResult(){
     if(fastBusy)return; fastBusy=true;
-    var x=new XMLHttpRequest(); x.open('GET','/api/result-fast?t='+Date.now(),true); x.timeout=3500;
-    function done(){fastBusy=false;}
+    var x=new XMLHttpRequest(); activeFastXHR=x; x.open('GET','/api/result-fast?t='+Date.now(),true); x.timeout=3500;
+    function done(){if(activeFastXHR===x)activeFastXHR=null;fastBusy=false;}
     x.onreadystatechange=function(){if(x.readyState!==4)return; done(); if(x.status<200||x.status>=300)return;
-      try{var d=JSON.parse(x.responseText); if(!d||!d.ready)return;
+      try{var d=JSON.parse(x.responseText); lastFastSuccess=Date.now(); if(!d||!d.ready)return;
         var c={period:d.period,platformPeriod:d.platformPeriod,block:d.targetBlock,blockNumber:d.targetBlock,numbers:d.numbers,singleCount:d.single};
         if(!fixedResult || Number(c.block)>=Number(fixedResult.block)){fixedResult=c; paintFixedResult(c);}
       }catch(e){}
@@ -385,8 +387,16 @@
     x.onerror=done; x.ontimeout=done; x.onabort=done; x.send(null);
   }
   function hardResync(){
-    drawRequestBusy=false; fastBusy=false; pendingAILock=false;
+    try{if(activeDrawXHR)activeDrawXHR.abort();}catch(e){}
+    try{if(activeFastXHR)activeFastXHR.abort();}catch(e){}
+    activeDrawXHR=null; activeFastXHR=null; drawRequestBusy=false; fastBusy=false; pendingAILock=false;
+    lastDrawSuccess=Date.now(); lastFastSuccess=Date.now();
     tickCountdown(); loadFastResult(); loadDraw();
+  }
+  // V7.3 watchdog: one stuck/failed request can never permanently stop the page.
+  function pageWatchdog(){
+    var now=Date.now();
+    if(!document.hidden && (now-lastDrawSuccess>9000 || now-lastFastSuccess>9000)) hardResync();
   }
   // iOS suspends page JS while locked/backgrounded. On wake, immediately discard stale timers and resync.
   document.addEventListener('visibilitychange',function(){if(!document.hidden)hardResync();});
@@ -397,6 +407,7 @@
   window.setInterval(loadDraw,700);
   window.setInterval(loadFastResult,450);
   tickCountdown(); window.setInterval(tickCountdown,200);
+  window.setInterval(pageWatchdog,2000);
 })();
 </script>
 </body>
