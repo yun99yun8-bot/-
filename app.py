@@ -62,7 +62,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v8.1.6-omission-independent-engine-1'
+MODEL_VERSION = 'v9.0-research-ai-walkforward-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -1850,52 +1850,128 @@ def _norm_scores(scores):
     if total <= 0:return {i:1/8 for i in range(8)}
     return {i:vals.get(i,0.0)/total for i in range(8)}
 
-def v7_ensemble(groups, historical, relation=None):
-    """Leakage-safe ensemble: only current pre-result groups + prior official history."""
-    hist=[int(x) for x in (historical or []) if 0 <= int(x) <= 7]
-    recent=hist[-120:]
-    long=hist[-1000:]
-    # Long/short empirical distributions with smoothing.
-    long_s={i:1.0 for i in range(8)}
-    short_s={i:1.0 for i in range(8)}
+def _candidate_rank(score_map):
+    return sorted(range(8), key=lambda i:(-float(score_map.get(i,0.0)), i))
+
+
+def research_model_performance(limit=500):
+    """Score candidate models only on predictions that were locked before results.
+
+    This is a rolling out-of-sample scoreboard: each stored row was created before
+    its group-20 result, so later verification can be used without label leakage.
+    Scores are shrunk toward neutral when the sample is small.
+    """
+    names=['long','short','structure17','transition','omission','binomial']
+    perf={n:{'n':0,'top1':0,'top3':0} for n in names}
+    conn=db_connect()
+    if conn is None: return perf
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT actual_single,ensemble_detail FROM ai_predictions
+                           WHERE actual_single IS NOT NULL AND ensemble_detail IS NOT NULL
+                           ORDER BY period_date DESC,period_no DESC LIMIT %s""",(int(limit),))
+            rows=cur.fetchall()
+        for r in rows:
+            actual=int(r['actual_single']); detail=r.get('ensemble_detail') or {}
+            if isinstance(detail,str):
+                try: detail=json.loads(detail)
+                except Exception: detail={}
+            parts=detail.get('components') or {}
+            for n in names:
+                comp=parts.get(n)
+                if not isinstance(comp,dict): continue
+                try: sm={int(k):float(v) for k,v in comp.items()}
+                except Exception: continue
+                rank=_candidate_rank(sm)
+                perf[n]['n']+=1
+                perf[n]['top1']+=int(bool(rank and rank[0]==actual))
+                perf[n]['top3']+=int(actual in rank[:3])
+    finally: db_release(conn)
+    for n,v in perf.items():
+        nn=v['n']; v['top1Rate']=round(v['top1']/nn*100,2) if nn else None
+        v['top3Rate']=round(v['top3']/nn*100,2) if nn else None
+    return perf
+
+
+def v9_research_ensemble(groups, historical, relation=None):
+    """V9 leakage-safe adaptive ensemble.
+
+    `historical` is newest -> oldest. Candidate weights are learned only from
+    already-verified, pre-result snapshots. A natural Binomial(7, .5) baseline
+    is always included so a complex signal must earn weight against a simple
+    reference instead of merely rediscovering 单3/单4 prevalence.
+    """
+    hist=[int(x) for x in (historical or []) if 0 <= int(x) <= 7]  # newest -> oldest
+    recent=hist[:120]
+    long=hist[:1000]
+    long_s={i:1.0 for i in range(8)}; short_s={i:1.0 for i in range(8)}
     for x in long: long_s[x]+=1
     for x in recent: short_s[x]+=1
     long_s=_norm_scores(long_s); short_s=_norm_scores(short_s)
 
-    # Current 1..17 structural distribution.
     struct={i:1.0 for i in range(8)}
     for g in range(1,18):
         row=groups.get(str(g))
-        if row: struct[int(row['singleCount'])]+=1
+        if row and row.get('singleCount') is not None: struct[int(row['singleCount'])]+=1
     struct=_norm_scores(struct)
 
-    # Transition model P(next | last official), smoothed.
+    # Historical is newest -> oldest. hist[j] happened after hist[j+1].
     trans={i:1.0 for i in range(8)}
-    if len(hist)>=2:
-        prev=hist[-1]
-        for a,b in zip(hist[:-1],hist[1:]):
-            if a==prev: trans[b]+=1
+    if hist:
+        latest=hist[0]
+        for j in range(1,min(len(hist)-1,500)):
+            if hist[j]==latest: trans[hist[j-1]]+=1
     trans=_norm_scores(trans)
 
-    # Omission pressure as a weak feature, deliberately capped.
     omit={i:1.0 for i in range(8)}
     for i in range(8):
         gap=0
-        for x in reversed(hist):
+        for x in hist:  # newest first: correct current omission
             if x==i: break
             gap+=1
-        omit[i]=1.0+min(gap,40)/40.0
+        # Keep omission deliberately weak; it must prove itself in OOS scoring.
+        omit[i]=1.0+min(gap,40)/80.0
     omit=_norm_scores(omit)
 
-    weights={'long':0.20,'short':0.22,'structure17':0.32,'transition':0.16,'omission':0.10}
-    parts={'long':long_s,'short':short_s,'structure17':struct,'transition':trans,'omission':omit}
+    binomial_raw=[1,7,21,35,35,21,7,1]
+    binomial={i:binomial_raw[i]/128.0 for i in range(8)}
+    parts={'long':long_s,'short':short_s,'structure17':struct,'transition':trans,
+           'omission':omit,'binomial':binomial}
+
+    perf=research_model_performance(500)
+    # Neutral prior + out-of-sample evidence. Top1 matters most; Top3 is secondary.
+    raww={}
+    for n in parts:
+        st=perf.get(n,{}) ; nn=int(st.get('n') or 0)
+        t1=(st.get('top1') or 0); t3=(st.get('top3') or 0)
+        # Beta-like shrinkage toward chance/base-neutral performance.
+        r1=(t1+12*0.125)/(nn+12) if nn else 0.125
+        r3=(t3+12*0.375)/(nn+12) if nn else 0.375
+        evidence=min(1.0,nn/120.0)
+        raww[n]=0.35 + evidence*(2.8*r1 + 0.7*r3)
+    sw=sum(raww.values()) or 1.0
+    weights={n:raww[n]/sw for n in raww}
     score={i:sum(weights[n]*parts[n][i] for n in weights) for i in range(8)}
-    order=sorted(range(8), key=lambda i:score[i], reverse=True)
-    # Confidence is separation, not a claimed win probability.
-    confidence=max(0.0,min(1.0,(score[order[0]]-score[order[1]])*8.0))
+    order=_candidate_rank(score)
+
+    # Evidence flag is descriptive, not a guarantee: compare candidate OOS Top1
+    # with the strongest simple reference observed so far.
+    complex_names=['long','short','structure17','transition','omission']
+    tested=[perf[n] for n in complex_names if perf.get(n,{}).get('n',0)>=30]
+    baseline_perf=perf.get('binomial',{})
+    best_complex=max((x.get('top1Rate') or 0 for x in tested),default=0)
+    base_rate=baseline_perf.get('top1Rate') or 0
+    edge='NO_EDGE'
+    if tested and best_complex >= base_rate + 2.0: edge='WEAK_EDGE'
+    if tested and best_complex >= base_rate + 5.0: edge='EVIDENCE'
+    sep=max(0.0,score[order[0]]-score[order[1]])
+    confidence=max(0.0,min(100.0,sep*800.0))
     return {'single':order[0],'top3':order[:3],
             'scores':{str(i):round(score[i]*100,3) for i in range(8)},
-            'confidence':round(confidence*100,1),'weights':weights,'components':parts}
+            'confidence':round(confidence,1),'weights':weights,'components':parts,
+            'research':{'mode':'rolling_oos','window':500,'performance':perf,
+                        'edgeStatus':edge,'bestComplexTop1':round(best_complex,2),
+                        'baselineTop1':round(base_rate,2)}}
 
 def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None, force_backend=False):
     """Lock a pre-result prediction.
@@ -1928,9 +2004,9 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
     historical=get_historical_official_singles(date_str,period)
     c17=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
 
-    # The production prediction is the local V7 ensemble.  It uses only data
+    # The production prediction is the V9 rolling out-of-sample research ensemble.  It uses only data
     # available before group20.  Do this before any nonessential analytics.
-    v7=v7_ensemble(groups,historical)
+    v7=v9_research_ensemble(groups,historical)
     ai=int(v7['single'])
     top3=[int(x) for x in v7['top3']]
     highest=stats.get('highest') or []

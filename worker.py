@@ -1,4 +1,4 @@
-"""V8.1.6 Production Background Worker.
+"""V9.0 Research AI Background Worker.
 All autonomous engine work lives here; Web remains read/API only.
 Cross-process health is persisted to PostgreSQL.
 """
@@ -26,7 +26,7 @@ if not core.DATABASE_URL:
 core.init_db()
 core.start_worker_once()
 core.record_system_event('worker_service_started', None, {'modelVersion': core.MODEL_VERSION, 'instanceId': INSTANCE_ID})
-print(f'[V8.1.6] worker started instance={INSTANCE_ID} model={core.MODEL_VERSION}', flush=True)
+print(f'[V9.0] worker started instance={INSTANCE_ID} model={core.MODEL_VERSION}', flush=True)
 
 last_log = 0.0
 while not _stop:
@@ -50,7 +50,7 @@ while not _stop:
         alive=[]
         with core._worker_threads_lock:
             alive=[name for name,th in core._worker_threads.items() if th and th.is_alive()]
-        print(f'[V8.1.6] heartbeat period={ps} db={"ok" if ok else "error"} engines={len(alive)} {alive}', flush=True)
+        print(f'[V9.0] heartbeat period={ps} db={"ok" if ok else "error"} engines={len(alive)} {alive}', flush=True)
         last_log=now
     time.sleep(5)
 
@@ -59,4 +59,4 @@ try:
     core.record_system_event('worker_service_stopping', None, {'modelVersion': core.MODEL_VERSION, 'instanceId': INSTANCE_ID})
 except Exception:
     pass
-print('[V8.1.6] worker stopping', flush=True)
+print('[V9.0] worker stopping', flush=True)
