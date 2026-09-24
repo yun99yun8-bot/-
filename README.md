@@ -53,3 +53,8 @@ AI statistical analysis module:
 - PostgreSQL persistence remains asynchronous and cannot delay the displayed result.
 - Frontend live polling is 200 ms.
 - `/api/draw` debug.fastTarget reports the winning provider and request latency for diagnosis.
+
+## 遗漏统计持久化恢复
+- 每次部署/重启后，从 PostgreSQL 保留的历史第20组正式结果重建 单0～单7 遗漏值，不再从0开始。
+- 恢复完成后，继续由当前正式结果实时递增/归零；同一期只更新一次，避免轮询重复累计。
+- `/api/draw` 增加 `omissionSource` 与 `omissionHistorySample` 便于确认恢复来源和样本数。

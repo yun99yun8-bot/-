@@ -51,6 +51,8 @@ _fast_diag = {'target': None, 'provider': None, 'firstSeenAt': None, 'latencyMs'
 _fast_diag_lock = threading.Lock()
 _period_group_cache = {}
 _period_group_cache_lock = threading.Lock()
+_omission_bootstrap_lock = threading.Lock()
+_omission_bootstrapped = False
 
 
 def current_period():
@@ -489,11 +491,64 @@ def get_db_recent_rows(limit=2000):
         db_release(conn)
 
 
+
+def restore_omission_from_db(date_str=None, period=None):
+    """Rebuild official-result omission counters from retained PostgreSQL data.
+
+    PostgreSQL is the persistence source across deploys/restarts.  We read the
+    retained platform group-20 blocks once, derive the current 单0..单7 omission
+    values, then normal realtime updates continue in memory/state.
+    """
+    global _omission_bootstrapped
+    with _omission_bootstrap_lock:
+        if _omission_bootstrapped:
+            return None
+        if date_str is None or period is None:
+            date_str, period, _, _ = current_period()
+        idx_now = period_index(date_str, int(period))
+        # Three days matches the database retention window.  Include current
+        # period if its group-20 block has already been persisted.
+        periods = []
+        wanted = []
+        for off in range(0, DB_RETENTION_DAYS * 1440):
+            idx = idx_now - off
+            ordinal, zero = divmod(idx, 1440)
+            d = date.fromordinal(ordinal)
+            pno = zero + 1
+            target = period_target_block(d.strftime('%Y-%m-%d'), pno)
+            periods.append((d.strftime('%Y-%m-%d'), pno, target))
+            wanted.append(target)
+        rows = get_db_blocks(wanted)
+        official = []
+        for dstr, pno, target in reversed(periods):
+            row = rows.get(target)
+            if row and row.get('single_count') is not None:
+                official.append((dstr, pno, target, int(row['single_count'])))
+        if not official:
+            return None
+        omission = {str(i): 0 for i in range(8)}
+        for _, _, _, single in official:
+            for i in range(8):
+                omission[str(i)] = 0 if i == single else omission[str(i)] + 1
+        last_d, last_p, _, _ = official[-1]
+        state = read_state() or {}
+        state['omission'] = omission
+        state['lastOmissionPeriod'] = f'{last_d}:{int(last_p):04d}'
+        state['omissionSource'] = 'PostgreSQL history + realtime memory'
+        state['omissionHistorySample'] = len(official)
+        write_state(state)
+        _omission_bootstrapped = True
+        return omission
+
 def tron_ingest_worker():
     """Low-latency TRON collector. PostgreSQL never blocks live publication."""
     global _live_latest_number
     try:
         init_db()
+        try:
+            restore_omission_from_db()
+        except Exception:
+            pass
     except Exception:
         pass
     last_seen = None
@@ -1025,6 +1080,12 @@ def draw():
     date_str, period, period_str, platform_period = current_period()
     state = read_state() or {}
     try:
+        if not _omission_bootstrapped:
+            try:
+                restore_omission_from_db(date_str, period)
+                state = read_state() or state
+            except Exception:
+                pass
         if not DATABASE_URL:
             raise RuntimeError('DATABASE_URL 未配置')
         groups, target20 = collect_groups_live(date_str, period)
@@ -1054,7 +1115,7 @@ def draw():
             'resultSingleCount': result_obj.get('singleCount') if result_obj else None,
             'resultBlockNumber': result_obj.get('blockNumber') if result_obj else None,
             'resultPlatformPeriod': result_obj.get('platformPeriod') if result_obj and result_obj.get('platformPeriod') else state.get('platformPeriod'),
-            'result': result_obj, 'omission': omission, 'resultHistory': history,
+            'result': result_obj, 'omission': omission, 'omissionSource': state.get('omissionSource', 'realtime state'), 'omissionHistorySample': state.get('omissionHistorySample', 0), 'resultHistory': history,
             'aiAnalysis': ai_info,
             'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
             'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
