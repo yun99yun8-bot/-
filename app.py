@@ -2,14 +2,16 @@ from pathlib import Path
 from flask import Flask, Response, jsonify
 from urllib.request import urlopen, Request
 import json
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 
 BASE_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path='')
 
-TRON_NOWBLOCK = 'https://api.trongrid.io/wallet/getnowblock'
+# Keep the same TRONGrid interface family already used by the previous version.
+TRON_API = 'https://api.trongrid.io/wallet'
+TRON_NOWBLOCK = f'{TRON_API}/getnowblock'
+TRON_BLOCK_BY_NUM = f'{TRON_API}/getblockbynum'
 
-# Platform period: 0001-1440, one period per minute, reset daily.
 CN_TZ = timezone(timedelta(hours=8))
 STATE_FILE = BASE_DIR / 'draw_state.json'
 
@@ -17,7 +19,16 @@ STATE_FILE = BASE_DIR / 'draw_state.json'
 def current_period():
     now = datetime.now(CN_TZ)
     period = now.hour * 60 + now.minute + 1
-    return now.strftime('%Y-%m-%d'), period
+    date_str = now.strftime('%Y-%m-%d')
+    period_str = f'{period:04d}'
+    # Platform display uses date + 4-digit minute period, e.g. 2609240486.
+    platform_period = now.strftime('%y%m%d') + period_str
+    return date_str, period, period_str, platform_period
+
+
+def period_index(date_str, period):
+    d = datetime.strptime(date_str, '%Y-%m-%d').date()
+    return d.toordinal() * 1440 + (int(period) - 1)
 
 
 def fetch_latest_block():
@@ -27,15 +38,35 @@ def fetch_latest_block():
     block_id = data.get('blockID')
     number = data.get('block_header', {}).get('raw_data', {}).get('number')
     timestamp = data.get('block_header', {}).get('raw_data', {}).get('timestamp')
+    if not block_id or not isinstance(block_id, str) or number is None:
+        raise RuntimeError('TRON 最新区块没有返回有效数据')
+    return {'block': block_id, 'number': int(number), 'timestamp': timestamp}
+
+
+def fetch_block_by_number(number):
+    payload = json.dumps({'num': int(number)}).encode('utf-8')
+    req = Request(
+        TRON_BLOCK_BY_NUM,
+        data=payload,
+        headers={'Content-Type': 'application/json', 'User-Agent': 'TornMonitor/1.0'},
+        method='POST'
+    )
+    with urlopen(req, timeout=8) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+    block_id = data.get('blockID')
     if not block_id or not isinstance(block_id, str):
-        raise RuntimeError('TRON 最新区块没有返回有效 blockID')
-    return {'block': block_id, 'number': number, 'timestamp': timestamp}
+        raise RuntimeError(f'目标区块 {number} 尚未可读取')
+    return {
+        'block': block_id,
+        'number': int(data.get('block_header', {}).get('raw_data', {}).get('number', number)),
+        'timestamp': data.get('block_header', {}).get('raw_data', {}).get('timestamp')
+    }
 
 
 def calc_numbers(block_hash):
-    """Apply the platform rule described by the user.
-    Traverse the hash right-to-left; collect A-E letters and 0-9 digits separately,
-    pair them by order, discard 00 and duplicate combinations, and continue until 7.
+    """Platform rule: read the hash from right to left.
+    Take A-E letters and 0-9 digits in their respective order, pair them,
+    map A=0...E=4, discard 00 and duplicate pairs, and continue until 7 valid values.
     """
     s = block_hash.upper()[::-1]
     letters = [c for c in s if c in 'ABCDE']
@@ -43,16 +74,11 @@ def calc_numbers(block_hash):
     li = di = 0
     used = set()
     result = []
-    # There can be more than 7 source candidates because invalid/duplicate pairs shift.
     while len(result) < 7 and li < len(letters) and di < len(digits):
         value = 'ABCDE'.index(letters[li]) * 10 + int(digits[di])
         li += 1
         di += 1
-        if value == 0:
-            continue
-        if value < 1 or value > 49:
-            continue
-        if value in used:
+        if value == 0 or value > 49 or value in used:
             continue
         used.add(value)
         result.append(value)
@@ -76,44 +102,86 @@ def write_state(data):
     tmp.replace(STATE_FILE)
 
 
+def target_block_number(date_str, period, state, latest_number):
+    """Locate the platform's result block.
+
+    Confirmed platform behavior from the supplied records: successive periods
+    normally advance by exactly 20 TRON blocks. We therefore continue from the
+    last confirmed period by +20, rather than using the arbitrary latest block.
+    For a fresh install on 2026-09-24, the supplied record 0481 -> 86511906 is
+    used as the calibration anchor; later periods advance by +20. If no anchor
+    is available, use the current chain height as a conservative fallback,
+    aligned to the current 20-block cycle.
+    """
+    if state and state.get('date') and state.get('period') and state.get('blockNumber') is not None:
+        try:
+            elapsed = period_index(date_str, int(period)) - period_index(state['date'], int(state['period']))
+            if elapsed >= 1:
+                return int(state['blockNumber']) + elapsed * 20
+        except Exception:
+            pass
+
+    # Current-day calibration supplied by the user: 2609240481 -> 86511906.
+    if date_str == '2026-09-24':
+        anchor_period = 481
+        anchor_block = 86511906
+        return anchor_block + (int(period) - anchor_period) * 20
+
+    # Fallback for a fresh install on another day: keep the same 20-block cadence.
+    # The exact phase can be recalibrated once the first confirmed period is stored.
+    return int(latest_number) - ((int(latest_number) - 6) % 20)
+
+
 @app.get('/')
 def index():
     return Response((BASE_DIR / 'index.html').read_text(encoding='utf-8'), mimetype='text/html; charset=utf-8')
+
 
 @app.get('/style.css')
 def style():
     return Response((BASE_DIR / 'style.css').read_text(encoding='utf-8'), mimetype='text/css; charset=utf-8')
 
+
 @app.get('/api/draw')
 def draw():
-    date_str, period = current_period()
-    period_str = f'{period:04d}'
+    date_str, period, period_str, platform_period = current_period()
     state = read_state()
 
-    # Same period: keep the already published result stable.
-    if state and state.get('date') == date_str and state.get('period') == period_str:
-        return jsonify({**state, 'ok': True, 'isNew': False})
+    # Same platform period: never recalculate or replace its published result.
+    if state and state.get('date') == date_str and state.get('period') == period_str and state.get('numbers'):
+        return jsonify({**state, 'platformPeriod': platform_period, 'singleCount': sum(int(n) % 2 for n in state['numbers']), 'ok': True, 'isNew': False})
 
-    # A new period has started. Try to obtain its result. Until a new result
-    # is successfully obtained, keep returning the previous published result
-    # instead of clearing the UI to '--'.
     try:
         latest = fetch_latest_block()
-        numbers = calc_numbers(latest['block'])
+        target_number = target_block_number(date_str, period, state, latest['number'])
+
+        # The result block has not been produced yet. Keep the previous period's
+        # result visible instead of clearing the screen.
+        if target_number > latest['number']:
+            if state and state.get('numbers'):
+                return jsonify({**state, 'platformPeriod': platform_period, 'waitingForNewResult': True, 'ok': True, 'isNew': False})
+            return jsonify({'ok': False, 'waitingForNewResult': True, 'error': '等待对应开奖区块'})
+
+        target = fetch_block_by_number(target_number)
+        numbers = calc_numbers(target['block'])
+        single_count = sum(n % 2 for n in numbers)
         new_state = {
             'date': date_str,
             'period': period_str,
-            'block': latest['block'],
-            'blockNumber': latest['number'],
+            'platformPeriod': platform_period,
+            'block': target['block'],
+            'blockNumber': target_number,
             'numbers': [f'{n:02d}' for n in numbers],
-            'source': 'TRON latest block',
+            'singleCount': single_count,
+            'source': 'TRONGrid / getblockbynum'
         }
         write_state(new_state)
         return jsonify({**new_state, 'ok': True, 'isNew': True})
     except Exception as exc:
-        if state:
-            return jsonify({**state, 'ok': True, 'isNew': False, 'waitingForNewResult': True, 'error': str(exc)})
+        if state and state.get('numbers'):
+            return jsonify({**state, 'platformPeriod': platform_period, 'ok': True, 'isNew': False, 'waitingForNewResult': True, 'error': str(exc)})
         return jsonify({'ok': False, 'error': str(exc)}), 502
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)

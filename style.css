@@ -43,3 +43,9 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 
 [hidden] { display: none !important; }
 .history-section .placeholder { min-height: 72px; display:flex; align-items:center; justify-content:center; }
+
+.draw-meta{display:flex;align-items:center;gap:7px}
+.single-badge{padding:7px 9px;border-radius:9px;background:#efe5ff;color:#6f3fb0;font-size:13px;font-weight:800;white-space:nowrap}
+.single-badge strong{font-size:16px;margin-left:1px}
+.period-badge{text-align:center}
+@media(max-width:360px){.draw-meta{gap:4px}.single-badge{font-size:11px;padding:6px 7px}.single-badge strong{font-size:14px}.period-badge{font-size:10px;padding:6px 6px}.period-badge strong{font-size:12px}}
