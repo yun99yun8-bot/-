@@ -3,6 +3,7 @@ from flask import Flask, Response, jsonify
 from urllib.request import urlopen, Request
 import json
 from datetime import datetime, timezone, timedelta, date
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path='')
@@ -44,8 +45,8 @@ def period_index(date_str, period):
 
 def _get_json(url, method='GET', payload=None):
     data = json.dumps(payload).encode('utf-8') if payload is not None else None
-    req = Request(url, data=data, headers={'Content-Type': 'application/json', 'User-Agent': 'TornMonitor/2.1'}, method=method)
-    with urlopen(req, timeout=10) as resp:
+    req = Request(url, data=data, headers={'Content-Type': 'application/json', 'User-Agent': 'TornMonitor/2.2'}, method=method)
+    with urlopen(req, timeout=4) as resp:
         return json.loads(resp.read().decode('utf-8'))
 
 def fetch_latest_block():
@@ -148,9 +149,12 @@ def period_target_block(date_str, period):
 
 
 def collect_period_groups(date_str, period, latest_number, state):
-    """Collect the 20 block positions inside the current platform period.
-    Group 20 is the official result block. Groups 1-18 feed the statistics;
-    groups 18-19 are also retained in the period record as requested.
+    """Incrementally collect the 20 positions.
+
+    The table is a fixed 20-row frame. Each API call fills only a small batch
+    of missing rows, so the page does not wait for all 20 blocks before showing
+    anything. Group 20 is included in the first batch so the official result
+    can become available immediately when its block exists.
     """
     target20 = period_target_block(date_str, period)
     if target20 is None:
@@ -164,31 +168,46 @@ def collect_period_groups(date_str, period, latest_number, state):
         groups = {}
     groups = {str(k): v for k, v in groups.items() if isinstance(v, dict)}
 
-    # A group is the corresponding consecutive TRON block; group 20 is target20.
-    # Keep all 20 rows in the period table. Statistics still use only 1-18.
+    # Only fetch a small batch each poll. This is the key change: rows already
+    # fetched stay on screen, while missing rows are filled progressively.
+    missing = []
     for group_no in range(1, 21):
         block_number = target20 - (20 - group_no)
-        if block_number > latest_number:
-            continue
-        key = str(group_no)
-        if key in groups and groups[key].get('blockNumber') == block_number and groups[key].get('numbers'):
-            continue
-        try:
-            block = fetch_block_by_number(block_number)
-            nums = calc_numbers(block['block'])
-            groups[key] = {
-                'group': group_no,
-                'blockNumber': block_number,
-                'block': block['block'],
-                'numbers': [f'{n:02d}' for n in nums],
-                'singleCount': calc_single_count(nums)
-            }
-        except Exception:
-            # Leave an unavailable group unfilled; later polling can retry it.
-            continue
+        if block_number <= latest_number:
+            key = str(group_no)
+            if not (key in groups and groups[key].get('blockNumber') == block_number and groups[key].get('numbers')):
+                missing.append((group_no, block_number))
+
+    # Put the official group 20 first, then fill the remaining rows in order.
+    missing.sort(key=lambda x: (0 if x[0] == 20 else 1, x[0]))
+    batch = missing[:4]
+
+    def fetch_one(item):
+        group_no, block_number = item
+        block = fetch_block_by_number(block_number)
+        nums = calc_numbers(block['block'])
+        return str(group_no), {
+            'group': group_no,
+            'blockNumber': block_number,
+            'block': block['block'],
+            'numbers': [f'{n:02d}' for n in nums],
+            'singleCount': calc_single_count(nums)
+        }
+
+    if batch:
+        # Parallelize the small batch so a slow provider does not make the page
+        # wait 4x the network timeout. Failed rows simply remain '--' and are
+        # retried on the next poll.
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = [pool.submit(fetch_one, item) for item in batch]
+            for future in as_completed(futures):
+                try:
+                    key, row = future.result()
+                    groups[key] = row
+                except Exception:
+                    pass
 
     return groups, target20
-
 
 def stats_from_groups(groups):
     """Statistics are based only on groups 1-18."""
@@ -288,26 +307,14 @@ def draw():
         latest = fetch_latest_block()
         groups, target20 = collect_period_groups(date_str, period, latest['number'], state)
 
-        # Official result = group 20. Do not publish it until its target block exists.
+        # Official result = group 20. collect_period_groups prioritizes this
+        # row, so do not make a second blocking network request here.
         official = None
         if target20 is not None and target20 <= latest['number']:
             key20 = '20'
-            if key20 in groups and groups[key20].get('blockNumber') == target20:
-                official = groups[key20]
-            else:
-                try:
-                    block20 = fetch_block_by_number(target20)
-                    nums20 = calc_numbers(block20['block'])
-                    official = {
-                        'group': 20,
-                        'blockNumber': target20,
-                        'block': block20['block'],
-                        'numbers': [f'{n:02d}' for n in nums20],
-                        'singleCount': calc_single_count(nums20)
-                    }
-                    groups[key20] = official
-                except Exception:
-                    official = None
+            candidate20 = groups.get(key20)
+            if isinstance(candidate20, dict) and candidate20.get('blockNumber') == target20 and candidate20.get('numbers'):
+                official = candidate20
 
         # Preserve the last confirmed official result until the next one exists.
         if official:
