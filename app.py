@@ -49,6 +49,8 @@ _relation_cache = {'key': None, 'at': 0, 'value': None}
 _relation_cache_lock = threading.Lock()
 _fast_diag = {'target': None, 'provider': None, 'firstSeenAt': None, 'latencyMs': None, 'errors': {}}
 _fast_diag_lock = threading.Lock()
+_period_group_cache = {}
+_period_group_cache_lock = threading.Lock()
 
 
 def current_period():
@@ -602,21 +604,36 @@ def collect_period_groups(date_str, period, latest_number, state):
     return groups, target20
 
 def collect_groups_live(date_str, period):
-    """Build the current 20-group frame from live memory + PostgreSQL.
+    """Return a genuinely incremental current-period group list.
 
-    Memory wins for newly calculated blocks, so each new group can appear on
-    the next frontend poll even if the database is briefly slow. PostgreSQL
-    fills older/current rows after restarts.
+    Live RAM is the realtime source. PostgreSQL is used only once to seed a
+    period after a restart, never on every 200 ms frontend poll. New blocks
+    published by the collector are merged immediately, so group N appears as
+    soon as that exact block is available.
     """
     target20 = period_target_block(date_str, period)
     wanted = [target20 - (20 - g) for g in range(1, 21)]
-    try:
-        rows = get_db_blocks(wanted)
-    except Exception:
-        rows = {}
+    period_key = f'{date_str}:{int(period):04d}'
+    with _period_group_cache_lock:
+        cache = _period_group_cache.get(period_key)
+    if cache is None:
+        try:
+            seed = get_db_blocks(wanted)
+        except Exception:
+            seed = {}
+        cache = dict(seed)
+        with _period_group_cache_lock:
+            _period_group_cache.clear()
+            _period_group_cache[period_key] = cache
     with _live_blocks_lock:
         live = {bn: dict(_live_blocks[bn]) for bn in wanted if bn in _live_blocks}
-    rows.update(live)
+    if live:
+        with _period_group_cache_lock:
+            cache = _period_group_cache.setdefault(period_key, {})
+            cache.update(live)
+            rows = dict(cache)
+    else:
+        rows = dict(cache)
     groups = {}
     for g, bn in enumerate(wanted, start=1):
         row = rows.get(bn)

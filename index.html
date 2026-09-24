@@ -118,6 +118,9 @@
   historyTab.onclick=function(){selectTab(false);};
 
   function text(id,value){var el=document.getElementById(id);if(el)el.textContent=(value===null||value===undefined||value==='')?'--':String(value);}
+  var currentCountdownValue=60;
+  var lockedAiDisplay=null;
+  var lockedAiPeriod='';
   function renderStats(data){
     var ds=data.dataStats||{}; var rows=Array.isArray(ds.stats)?ds.stats:[];
     for(var i=0;i<rows.length;i++){
@@ -130,18 +133,33 @@
     for(var j=0;j<highest.length;j++)names.push('单'+highest[j].single);
     text('statsConclusion',highest.length?'结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）':'结论：等待第1～18组数据');
     var ai=data.aiAnalysis||{};
-    var scoreMap=ai.scores||{}, ranked=[];
-    for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
-    ranked.sort(function(a,b){return b.score-a.score || a.single-b.single;});
-    var bestScore=(ai.single!=null && scoreMap[String(ai.single)]!=null)?Number(scoreMap[String(ai.single)]).toFixed(2):'--';
-    text('aiConclusion',ai.single!=null?'AI分析：单'+ai.single+'｜评分 '+bestScore+'%':'AI分析：等待数据');
-    var topParts=[]; for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
-    text('aiTop3',topParts.length?'本期AI预测前三：'+topParts.join('　'):'本期AI预测前三：等待数据');
-    var rel=Array.isArray(ai.relationTop3)?ai.relationTop3:[], relParts=[];
-    for(var ri=0;ri<rel.length;ri++) relParts.push('第'+rel[ri].group+'组 '+Number(rel[ri].matchRate||0).toFixed(2)+'%');
-    text('relationTop3',relParts.length?'历史高关联组次：'+relParts.join('　'):'历史高关联组次：等待数据');
-    var allParts=[]; for(var ax=0;ax<=7;ax++) allParts.push('单'+ax+' '+Number(scoreMap[String(ax)]||0).toFixed(1)+'%');
-    text('aiAllScores','单0～单7评分：'+allParts.join('｜'));
+    var periodKey=String(data.groupPeriodKey||data.currentPeriod||'');
+    if(lockedAiPeriod!==periodKey){ lockedAiPeriod=periodKey; lockedAiDisplay=null; }
+    // Only expose one stable prediction window per period: countdown 10..1.
+    // At 10 seconds snapshot the current backend analysis; do not let it jump afterwards.
+    if(currentCountdownValue===10 && !lockedAiDisplay){
+      lockedAiDisplay=JSON.parse(JSON.stringify(ai||{}));
+    }
+    var shown=(currentCountdownValue>=1 && currentCountdownValue<=10 && lockedAiDisplay)?lockedAiDisplay:null;
+    if(shown){
+      var scoreMap=shown.scores||{}, ranked=[];
+      for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
+      ranked.sort(function(a,b){return b.score-a.score || a.single-b.single;});
+      var bestScore=(shown.single!=null && scoreMap[String(shown.single)]!=null)?Number(scoreMap[String(shown.single)]).toFixed(2):'--';
+      text('aiConclusion',shown.single!=null?'AI分析：单'+shown.single+'｜评分 '+bestScore+'%':'AI分析：正在分析中…');
+      var topParts=[]; for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
+      text('aiTop3',topParts.length?'本期AI预测前三：'+topParts.join('　'):'本期AI预测前三：正在分析中…');
+      var rel=Array.isArray(shown.relationTop3)?shown.relationTop3:[], relParts=[];
+      for(var ri=0;ri<rel.length;ri++) relParts.push('第'+rel[ri].group+'组 '+Number(rel[ri].matchRate||0).toFixed(2)+'%');
+      text('relationTop3',relParts.length?'历史高关联组次：'+relParts.join('　'):'历史高关联组次：等待数据');
+      var allParts=[]; for(var ax=0;ax<=7;ax++) allParts.push('单'+ax+' '+Number(scoreMap[String(ax)]||0).toFixed(1)+'%');
+      text('aiAllScores','单0～单7评分：'+allParts.join('｜'));
+    }else{
+      text('aiConclusion','AI分析：正在分析中…');
+      text('aiTop3','本期AI预测前三：正在分析中…');
+      text('relationTop3','历史高关联组次：正在分析中…');
+      text('aiAllScores','单0～单7评分：正在分析中…');
+    }
     var rate=ai.hitRate!=null?Number(ai.hitRate).toFixed(2)+'%':'--';
     text('aiAccuracy','AI历史验证：'+Number(ai.hits||0)+'/'+Number(ai.verifiedSample||0)+'（'+rate+'）');
     var same=Array.isArray(ai.sameAsGroup20)?ai.sameAsGroup20:[];
@@ -163,12 +181,14 @@
       groupSeenKeys[key]=true;
     }
     groupsInitialized=true;
-    var html='';
-    for(var n=1;n<=20;n++){
-      var g=map[n], block=g&&g.blockNumber!=null?g.blockNumber:'--', single=g&&g.singleCount!=null?'单'+g.singleCount:'--';
-      var nums=g&&Array.isArray(g.numbers)&&g.numbers.length?g.numbers.join(' '):'--';
-      var rowKey=g?periodKey+'|'+n+'|'+String(g.blockNumber==null?'':g.blockNumber):'';
-      var rowClass=(rowKey && groupHighlightUntil[rowKey] && groupHighlightUntil[rowKey]>now)?' class="new-group-row"':'';
+    var html='', available=[];
+    for(var n=1;n<=20;n++) if(map[n]) available.push(n);
+    if(!available.length){ body.innerHTML='<tr><td colspan="4">等待本期新区块…</td></tr>'; return; }
+    for(var ai=0;ai<available.length;ai++){
+      var n=available[ai], g=map[n], block=g.blockNumber!=null?g.blockNumber:'--', single=g.singleCount!=null?'单'+g.singleCount:'--';
+      var nums=Array.isArray(g.numbers)&&g.numbers.length?g.numbers.join(' '):'--';
+      var rowKey=periodKey+'|'+n+'|'+String(g.blockNumber==null?'':g.blockNumber);
+      var rowClass=(groupHighlightUntil[rowKey] && groupHighlightUntil[rowKey]>now)?' class="new-group-row"':'';
       html+='<tr'+rowClass+'><td>第'+n+'组</td><td>'+block+'</td><td>'+single+'</td><td>'+nums+'</td></tr>';
     }
     body.innerHTML=html;
@@ -231,6 +251,8 @@
     var b=beijingParts(), sec=b.getSeconds(), ms=b.getMilliseconds();
     // Show 00 briefly at the exact Beijing minute boundary, then start 60..59..
     var value=(sec===0 && ms<650)?0:(sec===0?60:60-sec);
+    currentCountdownValue=value;
+    if(value===0) lockedAiDisplay=null;
     text('countdown',value<10?'0'+value:value);
     var minuteKey=b.getFullYear()+'-'+(b.getMonth()+1)+'-'+b.getDate()+' '+b.getHours()+':'+b.getMinutes();
     if(value===0 && lastZeroMinute!==minuteKey){
