@@ -76,6 +76,12 @@ with lock:
         day TEXT PRIMARY KEY,
         anchor_block INTEGER
     )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS period_targets(
+        day TEXT NOT NULL,
+        period_index INTEGER NOT NULL,
+        target_block INTEGER NOT NULL,
+        PRIMARY KEY(day,period_index)
+    )""")
     c.execute("INSERT OR IGNORE INTO anchors(day,anchor_block) VALUES(?,?)",
               (DEFAULT_ANCHOR_DATE, DEFAULT_ANCHOR_BLOCK))
     c.commit()
@@ -137,22 +143,66 @@ def fetch_block_by_number(number):
     r.raise_for_status(); return r.json()
 
 
+def get_period_target(day, idx):
+    with lock:
+        c=db(); row=c.execute("SELECT target_block FROM period_targets WHERE day=? AND period_index=?", (day,int(idx))).fetchone(); c.close()
+    return int(row["target_block"]) if row else None
+
+
+def save_period_target(day, idx, block):
+    with lock:
+        c=db(); c.execute("INSERT OR IGNORE INTO period_targets(day,period_index,target_block) VALUES(?,?,?)", (day,int(idx),int(block))); c.commit(); c.close()
+
+
+def block_timestamp(block):
+    try:
+        data=fetch_block_by_number(block)
+        raw=data.get("block_header",{}).get("raw_data",{})
+        ts=raw.get("timestamp")
+        return int(ts) if ts is not None else None
+    except Exception:
+        return None
+
+
 def target_block_for_datetime(dt):
     day=dt.strftime("%Y-%m-%d"); idx=dt.hour*60+dt.minute
-    anchor=get_anchor(day)
-    if anchor is None:
-        with lock: current=latest.get("chain_block")
-        if current is None: return None,False
-        # anchor定义为当天00:00对应的第一个分钟槽基准；0001期目标块=anchor+20。
-        anchor=int(current)-idx*20
-        set_anchor(day,anchor)
-        return anchor+idx*20,False
-    return anchor+idx*20,True
+    if idx < 1: idx = 1
+    saved=get_period_target(day,idx)
+    if saved is not None: return saved,True
+
+    # 官方期号对应“该分钟结束附近的最后一个TRON区块”。
+    # 不再使用 anchor + idx*20，因为TRON偶尔会漏块，实际期号间隔可能是18、19、20等。
+    prev=get_period_target(day,idx-1) if idx>1 else None
+    if prev is None and idx==1:
+        prev_day=(dt-timedelta(days=1)).strftime("%Y-%m-%d")
+        prev=get_period_target(prev_day,1440)
+    with lock: chain=latest.get("chain_block")
+    if chain is None: return None,False
+
+    # 以20块/分钟作估计中心，然后在附近区块中寻找时间戳最接近本期分钟边界的区块。
+    center=(prev+20) if prev is not None else int(chain)
+    boundary=dt.replace(second=0,microsecond=0)+timedelta(minutes=1)
+    boundary_ms=int(boundary.timestamp()*1000)
+    candidates=[]
+    for b in range(max(1,center-12), center+13):
+        if b>int(chain): continue
+        ts=block_timestamp(b)
+        if ts is not None:
+            candidates.append((abs(ts-boundary_ms), b, ts))
+    if not candidates: return None,False
+    # 只接受位于本分钟/边界附近的区块；否则等待下一轮获取更多链数据。
+    candidates.sort(key=lambda x:x[0])
+    _, target, _ = candidates[0]
+    save_period_target(day,idx,target)
+    return target,False
 
 
 def current_position(target, chain_block):
-    if target is None or chain_block is None: return 0
-    return max(0,min(20,int(chain_block)-int(target)+20))
+    # 20组是当前一分钟内部的20个进度槽；进度按北京时间的秒数推进。
+    now=local_now()
+    sec=now.second + now.microsecond/1_000_000
+    pos=int(sec/3)+1
+    return max(1,min(20,pos))
 
 
 def save_minute_block(day, idx, pos, block, block_hash, calc, ts):
@@ -300,6 +350,7 @@ def state():
     recent60=all_rows[-60:]
     single_counts={str(i):sum(1 for r in recent60 if int(r["odd"])==i) for i in range(1,8)}
     combo_counts=Counter(f"{r['odd']}单{r['even']}双" for r in recent60)
+    current20=[dict(r) for r in current_rows]
     histpred=historical_prediction(all_rows,period)
     latest_copy=dict(latest); latest_copy.update({"target_block":target,"chain_block":chain,"progress":progress})
     return {"latest":latest_copy,"day":day,"current_time":day,"period_index":idx,"display_period":f"{idx:04d}",
@@ -307,7 +358,7 @@ def state():
             "prediction_total":int(done["n"] or 0),"hits":int(done["h"] or 0),"misses":int(done["n"] or 0)-int(done["h"] or 0),
             "hit_rate":round(int(done["h"] or 0)*100/int(done["n"]),1) if int(done["n"] or 0) else 0,
             "single_counts":single_counts,"combo_counts":dict(combo_counts.most_common()),
-            "king_history":[dict(x) for x in cycles],"history":[dict(x) for x in recent60[::-1]],"history_all":[dict(x) for x in all_rows[::-1]],
+            "king_history":[dict(x) for x in cycles],"current20":[dict(x) for x in current20],"history":[dict(x) for x in recent60[::-1]],"history_all":[dict(x) for x in all_rows[::-1]],
             "history_count":len(all_rows),"historical_prediction":histpred}
 
 
@@ -391,10 +442,11 @@ th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-alig
 </div>
 
 <div class="card">
-<b>最近60期预判记录</b>
+<b>当期20组实际记录</b>
+<div class="note" style="margin-top:5px">只显示当前期已经实际读取到的20组区块数据；每组独立显示7个号码及单双，20/20完成后显示完整20组。</div>
 <table>
-<thead><tr><th>期号</th><th>预判</th><th>实际</th><th>结果</th></tr></thead>
-<tbody id="cycles"></tbody>
+<thead><tr><th>组</th><th>区块</th><th>7个号码</th><th>单双</th></tr></thead>
+<tbody id="current20"></tbody>
 </table>
 </div>
 
@@ -479,9 +531,10 @@ async function refresh(){
   document.getElementById('miss').textContent=d.misses;
   document.getElementById('rate').textContent=d.hit_rate+'%';
 
-  document.getElementById('cycles').innerHTML=d.king_history.map(x=>
-   '<tr><td>'+esc(String(x.period||'').slice(-4))+'</td><td>'+esc(x.prediction||'-')+'</td><td>'+esc(x.actual||'-')+'</td><td>'+(x.hit?'✅':'❌')+'</td></tr>'
-  ).join('');
+  document.getElementById('current20').innerHTML=(d.current20||[]).map(x=>{
+    const nums=(x.numbers||'').split(',').filter(Boolean).map(n=>String(n).padStart(2,'0')).join(' ');
+    return '<tr><td>第'+x.position+'组</td><td>'+x.block+'</td><td>'+esc(nums)+'</td><td>'+x.odd+'单'+x.even+'双</td></tr>';
+  }).join('');
 
   const sc=d.single_counts||{};
   document.getElementById('singleCounts').innerHTML=
