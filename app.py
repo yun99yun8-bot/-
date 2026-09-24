@@ -1,6 +1,7 @@
 from pathlib import Path
 from flask import Flask, Response, jsonify, request
 from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 import json
 import os
 import time
@@ -61,7 +62,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v8.1.3-lifecycle-trace-warmbackfill-1'
+MODEL_VERSION = 'v8.1.4-tron-throttle-gaprepair-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -69,6 +70,35 @@ _worker_threads = {}
 _worker_threads_lock = threading.Lock()
 _worker_restarts = {}
 AUTONOMOUS_STATES = ('COLLECTING','G17_READY','AI_LOCK_ATTEMPT','AI_LOCKED','WAIT_G20','RESULT_READY','VERIFIED','COMPLETE','MISSED_PREDICTION')
+
+# V8.1.4 shared upstream rate governor. All TRON HTTP paths share it so
+# independent engines cannot accidentally hammer the same public APIs.
+_tron_http_lock = threading.Lock()
+_tron_last_request_at = 0.0
+_tron_cooldown_until = 0.0
+_tron_rate_diag = {'last429At': None, 'cooldownUntil': None, 'requestCount': 0, '429Count': 0}
+TRON_MIN_REQUEST_INTERVAL = 0.85
+TRON_429_COOLDOWN_SECONDS = 18.0
+
+def _tron_rate_wait():
+    global _tron_last_request_at
+    while True:
+        with _tron_http_lock:
+            now=time.monotonic()
+            wait=max(_tron_cooldown_until-now, TRON_MIN_REQUEST_INTERVAL-(now-_tron_last_request_at), 0.0)
+            if wait <= 0:
+                _tron_last_request_at=now
+                _tron_rate_diag['requestCount'] += 1
+                return
+        time.sleep(min(wait, 1.0))
+
+def _tron_mark_429():
+    global _tron_cooldown_until
+    with _tron_http_lock:
+        _tron_cooldown_until=max(_tron_cooldown_until, time.monotonic()+TRON_429_COOLDOWN_SECONDS)
+        _tron_rate_diag['429Count'] += 1
+        _tron_rate_diag['last429At']=datetime.now(CN_TZ).isoformat(timespec='seconds')
+        _tron_rate_diag['cooldownUntil']=(datetime.now(CN_TZ)+timedelta(seconds=TRON_429_COOLDOWN_SECONDS)).isoformat(timespec='seconds')
 
 
 
@@ -103,10 +133,17 @@ def period_index(date_str, period):
 
 
 def _get_json(url, method='GET', payload=None):
+    # Every public TRON request passes through one process-wide governor.
+    _tron_rate_wait()
     data = json.dumps(payload).encode('utf-8') if payload is not None else None
     req = Request(url, data=data, headers={'Content-Type': 'application/json', 'User-Agent': 'TornMonitor/2.2'}, method=method)
-    with urlopen(req, timeout=4) as resp:
-        return json.loads(resp.read().decode('utf-8'))
+    try:
+        with urlopen(req, timeout=4) as resp:
+            return json.loads(resp.read().decode('utf-8'))
+    except HTTPError as exc:
+        if getattr(exc, 'code', None) == 429:
+            _tron_mark_429()
+        raise
 
 def fetch_latest_block():
     errors = []
@@ -161,48 +198,31 @@ def fetch_block_by_number(number):
     raise RuntimeError(f'目标区块 {number} 尚未可读取；' + ' | '.join(errors))
 
 def fetch_block_fast(number):
-    """Race non-solidity providers for the target block; first valid block wins."""
-    number = int(number)
-    started = time.perf_counter()
-    errors = {}
-
-    def via_trongrid():
-        data = _get_json(TRON_BLOCK_BY_NUM, method='POST', payload={'num': number})
-        block_id = data.get('blockID')
-        if not block_id:
-            raise RuntimeError('block not found')
-        return 'TRONGrid-FullNode', {
-            'block': block_id,
-            'number': int(data.get('block_header', {}).get('raw_data', {}).get('number', number)),
-            'timestamp': data.get('block_header', {}).get('raw_data', {}).get('timestamp')
-        }
-
-    def via_tronscan():
-        data = _get_json(f'{TRONSCAN_BLOCK}?number={number}')
-        rows = data.get('data') if isinstance(data, dict) else None
-        row = rows[0] if isinstance(rows, list) and rows else None
-        if not row or not row.get('hash'):
-            raise RuntimeError('block not found')
-        return 'TRONScan', {'block': row['hash'], 'number': int(row.get('number', number)), 'timestamp': row.get('timestamp')}
-
-    pool = ThreadPoolExecutor(max_workers=2)
-    futures = [pool.submit(via_trongrid), pool.submit(via_tronscan)]
-    try:
-        for future in as_completed(futures, timeout=3.2):
-            try:
-                provider, block = future.result()
-                if int(block.get('number', -1)) == number and block.get('block'):
-                    elapsed = round((time.perf_counter() - started) * 1000, 1)
-                    for f in futures:
-                        if f is not future:
-                            f.cancel()
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    return block, provider, elapsed, errors
-            except Exception as exc:
-                errors[str(len(errors)+1)] = str(exc)
-    finally:
-        pool.shutdown(wait=False, cancel_futures=True)
-    raise RuntimeError('target block not yet available: ' + ' | '.join(errors.values()))
+    """Rate-safe target lookup. Avoid provider racing, which multiplied 429 traffic."""
+    number=int(number)
+    started=time.perf_counter()
+    errors={}
+    providers=[('TRONGrid-FullNode', TRON_BLOCK_BY_NUM, 'POST'), ('TRONScan', TRONSCAN_BLOCK, 'GET')]
+    for name,url,method in providers:
+        try:
+            if method == 'POST':
+                data=_get_json(url, method='POST', payload={'num':number})
+                block_id=data.get('blockID')
+                if not block_id: raise RuntimeError('block not found')
+                block={'block':block_id,'number':int(data.get('block_header',{}).get('raw_data',{}).get('number',number)),'timestamp':data.get('block_header',{}).get('raw_data',{}).get('timestamp')}
+            else:
+                data=_get_json(f'{url}?number={number}')
+                rows=data.get('data') if isinstance(data,dict) else None
+                row=rows[0] if isinstance(rows,list) and rows else None
+                if not row or not row.get('hash'): raise RuntimeError('block not found')
+                block={'block':row['hash'],'number':int(row.get('number',number)),'timestamp':row.get('timestamp')}
+            if block.get('block') and int(block.get('number',-1)) == number:
+                return block,name,round((time.perf_counter()-started)*1000,1),errors
+        except Exception as exc:
+            errors[name]=str(exc)[:220]
+            # A 429 activates the shared cooldown; do not fan out immediately.
+            if '429' in str(exc): break
+    raise RuntimeError('target block not yet available: '+' | '.join(errors.values()))
 
 
 def target_result_fast_worker():
@@ -210,7 +230,7 @@ def target_result_fast_worker():
     last_target = None
     while True:
         worker_touch('target-result-fast')
-        sleep_for = 0.20
+        sleep_for = 0.95
         try:
             date_str, period, _, _ = current_period()
             target = period_target_block(date_str, period)
@@ -235,7 +255,7 @@ def target_result_fast_worker():
                     with _fast_diag_lock:
                         _fast_diag['errors'] = {'last': str(exc)[:300]}
             else:
-                sleep_for = 0.35
+                sleep_for = 1.0
         except Exception as exc:
             with _fast_diag_lock:
                 _fast_diag['errors'] = {'worker': str(exc)[:300]}
@@ -702,20 +722,33 @@ def tron_ingest_worker():
                 # Do NOT seed last_seen from PostgreSQL: target-result-fast can
                 # persist a later target block first, which previously made the
                 # collector skip groups 1..19 after a deploy/restart.
-                warm_start = max(end - 79, 0)
-                for n in range(warm_start, end + 1):
+                # First hydrate RAM from PostgreSQL at zero upstream cost.  Do not
+                # trust DB MAX as the collector cursor because group20 may have been
+                # persisted ahead of groups1..19 by the fast watcher.
+                try:
+                    for row in get_db_recent_rows(90):
+                        publish_block_live({'block': row['block_hash'], 'number': int(row['block_number']), 'timestamp': row.get('block_time')})
+                except Exception as exc:
+                    worker_touch('tron-ingest', f'db-warmcache: {exc}')
+                # Repair only the small recent gap window and skip blocks already in RAM.
+                warm_start=max(end-23,0)
+                for n in range(warm_start,end+1):
                     try:
-                        block = latest if n == end else fetch_block_by_number(n)
-                        publish_block_live(block)
-                        enqueue_block_for_db(block)
-                        last_seen = n
+                        with _live_blocks_lock:
+                            already=n in _live_blocks
+                        if already:
+                            last_seen=max(last_seen or 0,n); continue
+                        block=latest if n==end else fetch_block_by_number(n)
+                        publish_block_live(block); enqueue_block_for_db(block); last_seen=n
                     except Exception as exc:
-                        worker_touch('tron-ingest', f'warmbackfill block={n}: {exc}')
+                        worker_touch('tron-ingest', f'gaprepair block={n}: {exc}')
+                        if '429' in str(exc): break
+                        # preserve order; retry the missing block on the next pass
                         break
                 if last_seen is None:
-                    last_seen = max(end - 1, 0)
+                    last_seen=max(end-1,0)
             if end > last_seen:
-                start_n = max(last_seen + 1, end - 79)
+                start_n = max(last_seen + 1, end - 23)
                 for n in range(start_n, end + 1):
                     try:
                         block = latest if n == end else fetch_block_by_number(n)
@@ -730,9 +763,9 @@ def tron_ingest_worker():
                 last_cleanup = time.time()
         except Exception:
             pass
-        # 0.5 s detection loop reduces our own polling latency without tying
-        # result publication to database latency.
-        time.sleep(0.5)
+        # Public APIs are shared resources; ~1.25s latest polling plus the global
+        # governor is sufficient for a ~3s block cadence without self-throttling.
+        time.sleep(1.25)
 
 def record_system_event(event_type, period_key=None, detail=None):
     conn=None
@@ -2072,6 +2105,8 @@ def system_health():
         runtime['workerOnline']=any(v.get('role')=='worker' and v.get('healthy') for v in service_status.values())
         runtime['currentPeriodState']=dict(pr) if pr else None
         runtime['workerRestarts']=dict(_worker_restarts)
+        with _tron_http_lock:
+            runtime['tronRateLimit']=dict(_tron_rate_diag)
         return jsonify({'ok':True,'period':ps,'platformPeriod':platform,'modelVersion':MODEL_VERSION,'counts':counts,'runtime':runtime})
     except Exception as exc:
         return jsonify({'ok':False,'error':type(exc).__name__,'message':str(exc)[:200],'runtime':dict(_runtime_health)}),503
