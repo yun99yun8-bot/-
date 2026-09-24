@@ -1,1 +1,27 @@
-*{box-sizing:border-box}html,body{margin:0;padding:0;background:#f4f6f8;color:#1f2937;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}.app{max-width:520px;margin:0 auto;min-height:100vh;background:#f4f6f8}.topbar{height:56px;background:#fff;display:flex;align-items:center;padding:0 16px;border-bottom:1px solid #e8ebef}.brand{font-size:19px;font-weight:700}.top-spacer{flex:1}.page-tabs{display:flex;background:#fff;border-bottom:1px solid #e8ebef}.page-tabs button{flex:1;height:48px;border:0;background:transparent;font-size:16px;color:#7b8490;position:relative}.page-tabs button.active{color:#111827;font-weight:700}.page-tabs button.active:after{content:"";position:absolute;left:28%;right:28%;bottom:0;height:3px;border-radius:3px;background:#111827}.content{padding:12px}.card{background:#fff;border-radius:12px;margin-bottom:12px;padding:14px;box-shadow:0 1px 3px rgba(0,0,0,.04)}.section-title{font-size:16px;font-weight:700;margin-bottom:12px}.placeholder{min-height:52px;border-radius:8px;background:#f7f8fa;display:flex;align-items:center;justify-content:center;color:#a0a8b2;font-size:14px}.hero-card .placeholder.large{min-height:110px}.omission-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.stat{background:#f7f8fa;border-radius:9px;padding:12px 6px;text-align:center;font-weight:700;font-size:15px}.stat small{display:block;margin-top:5px;font-size:12px;color:#8b95a1;font-weight:400}.table-placeholder{min-height:150px}@media(max-width:360px){.content{padding:10px}.card{padding:12px}.omission-grid{gap:6px}.stat{font-size:14px}}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+.app{max-width:520px;margin:0 auto;min-height:100vh;background:#f5f7fb}
+.topbar{height:58px;background:#fff;display:flex;align-items:center;padding:0 16px;border:2px solid #e91e63;border-radius:14px;margin:10px 10px 8px;box-shadow:0 2px 8px rgba(31,55,90,.06)}
+.brand{font-size:20px;font-weight:800;color:#24324b}
+.top-spacer{flex:1}
+.page-tabs{display:flex;background:#fff;margin:0 10px 10px;border:2px solid #2f6bdc;border-radius:12px;overflow:hidden}
+.page-tabs button{flex:1;height:48px;border:0;background:#fff;font-size:17px;color:#5f6d82;position:relative}
+.page-tabs button.active{background:#2f6bdc;color:#fff;font-weight:800}
+.page-tabs button.active:after{display:none}
+.content{padding:2px 10px 14px}
+.card{background:#fff;border-radius:12px;margin-bottom:12px;padding:14px;border:2px solid #dce4ef;box-shadow:0 2px 8px rgba(31,55,90,.05)}
+.hero-card{border-color:#ef7d22}
+.hero-card .section-title{color:#a94b08}
+.section-title{font-size:17px;font-weight:800;margin-bottom:12px;color:#24324b}
+.placeholder{min-height:52px;border-radius:9px;background:#f7f9fc;display:flex;align-items:center;justify-content:center;color:#9aa5b5;font-size:14px}
+.hero-card .placeholder.large{min-height:118px;background:#fff8f2;color:#c47a3b}
+.content>.card:nth-child(2){border-color:#8b4de8}
+.content>.card:nth-child(2) .section-title{color:#5d25a8}
+.omission-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.stat{border-radius:9px;padding:12px 6px;text-align:center;font-weight:800;font-size:15px;color:#24324b;border:1px solid rgba(80,100,130,.08)}
+.stat small{display:block;margin-top:5px;font-size:12px;color:#718096;font-weight:500}
+.stat:nth-child(1){background:#ffe4e6;color:#c62828}.stat:nth-child(2){background:#fff0d8;color:#d68100}.stat:nth-child(3){background:#def7d8;color:#2e8b38}.stat:nth-child(4){background:#d8f5ed;color:#177c6a}.stat:nth-child(5){background:#dceeff;color:#2267b1}.stat:nth-child(6){background:#e1e7ff;color:#304db2}.stat:nth-child(7){background:#eee2ff;color:#7040ad}.stat:nth-child(8){background:#f6def8;color:#9b3aa0}
+.content>.card:nth-child(3){border-color:#2196f3}
+.content>.card:nth-child(3) .section-title{color:#1b67aa}
+.table-placeholder{min-height:180px;background:#f8fbff}
+@media(max-width:360px){.content{padding:2px 8px 12px}.topbar,.page-tabs{margin-left:8px;margin-right:8px}.card{padding:12px}.omission-grid{gap:6px}.stat{font-size:14px}}
