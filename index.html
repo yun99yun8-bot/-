@@ -56,23 +56,29 @@
     </main>
 
     <main class="content" id="historyContent" hidden>
-      <section class="card history-section">
-        <div class="section-title">一、当前期1～18组统计</div>
-        <div class="stats-note">原首页统计移到历史数据页，仅作为描述性统计，不等同于预测。</div>
-        <div class="prob-grid" id="probGrid">
-          <div class="prob-item" data-prob-single="3">单3<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="4">单4<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="5">单5<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="2">单2<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="0">单0<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="7">单7<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="1">单1<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
+      <section id="historyHub" class="history-hub">
+        <div class="history-hero"><div><div class="history-eyebrow">HISTORY CENTER</div><h2>历史数据中心</h2><p>六个独立分析模块，点击进入查看详细数据。首页不堆叠复杂表格。</p></div><div class="history-hero-badge">5000期<br><small>历史容量</small></div></div>
+        <div class="history-nav-grid">
+          <button class="history-nav-card" data-history-panel="draws"><span class="history-nav-icon">01</span><strong>历史开奖记录</strong><small>30 / 50 / 100 / 500 / 1000 / 5000期</small><em>查看开奖记录 →</em></button>
+          <button class="history-nav-card" data-history-panel="predictions"><span class="history-nav-icon">02</span><strong>AI预测记录</strong><small>17组结论、10秒AI、前三与实际验证</small><em>查看预测记录 →</em></button>
+          <button class="history-nav-card" data-history-panel="gaps"><span class="history-nav-icon">03</span><strong>超期遗漏统计</strong><small>阈值事件、历史占比与完整间隔过程</small><em>查看遗漏详情 →</em></button>
+          <button class="history-nav-card" data-history-panel="patterns"><span class="history-nav-icon">04</span><strong>1000期AI规律库</strong><small>长期分布、遗漏条件率、哈希结构诊断</small><em>查看规律分析 →</em></button>
+          <button class="history-nav-card" data-history-panel="blocks"><span class="history-nav-icon">05</span><strong>20组区块数据</strong><small>当前期1～20组区块、单数与7个号码</small><em>查看区块数据 →</em></button>
+          <button class="history-nav-card" data-history-panel="verify"><span class="history-nav-icon">06</span><strong>AI验证统计</strong><small>历史样本、前三命中与当前1～18组分布</small><em>查看验证统计 →</em></button>
         </div>
       </section>
-      <section class="card history-section">
-        <div class="section-title">二、本期20组区块数据</div>
-        <div class="history20-note">固定显示第1～20组；未取得的组显示等待数据。</div>
-        <div class="group-table-wrap"><table class="group-table"><thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead><tbody id="groupTableBody"><tr><td colspan="4">等待数据</td></tr></tbody></table></div>
-      </section>
-      <section class="card history-section"><div class="section-title">三、历史AI验证</div><div class="history-status" id="historyModel">正在读取历史模型数据…</div></section>
-      <section class="card history-section"><div class="section-title">四、历史开奖记录</div><div class="history-filter"><label for="historyLimitSelect">查看期数：</label><select id="historyLimitSelect"><option value="30" selected>30期</option><option value="50">50期</option><option value="100">100期</option><option value="500">500期</option><option value="1000">1000期</option><option value="5000">5000期</option></select><span id="historyLimitStatus">最多保留5000期</span></div><div class="history-table-box" id="historyDraws"><div class="history-empty">正在读取历史开奖记录…</div></div></section>
-      <section class="card history-section"><div class="section-title">五、历史预判记录</div><div class="history-table-box" id="historyPredictions"><div class="history-empty">正在读取历史预判记录…</div></div></section>
-      <section class="card history-section"><div class="section-title">六、超期遗漏统计</div><div class="history20-note">单3/4 ＞7期，单2/5 ＞10期，单1/6 ＞30期，单0/7 ＞200期。点击类别查看每次超期明细。</div><div id="gapStats" class="prob-grid"><div class="history-empty">正在计算5000期超期记录…</div></div><div id="gapDetail" class="history-table-box" style="display:none;margin-top:10px"></div></section>
-      <section class="card history-section"><div class="section-title">七、AI规律库（滚动1000期）</div><div class="history-table-box" id="patternInsights"><div class="history-empty">正在读取遗漏卡期、长期分布和哈希结构…</div></div></section>
+
+      <section class="history-panel" data-panel="draws" hidden><div class="history-panel-head"><button class="history-back">‹ 功能导航</button><div><div class="history-eyebrow">DRAW HISTORY</div><h2>历史开奖记录</h2><p>按需要选择样本长度，默认最近30期。</p></div></div><section class="card history-section"><div class="history-filter"><label for="historyLimitSelect">查看期数：</label><select id="historyLimitSelect"><option value="30" selected>30期</option><option value="50">50期</option><option value="100">100期</option><option value="500">500期</option><option value="1000">1000期</option><option value="5000">5000期</option></select><span id="historyLimitStatus">最多保留5000期</span></div><div class="history-table-box" id="historyDraws"><div class="history-empty">正在读取历史开奖记录…</div></div></section></section>
+
+      <section class="history-panel" data-panel="predictions" hidden><div class="history-panel-head"><button class="history-back">‹ 功能导航</button><div><div class="history-eyebrow">AI RECORDS</div><h2>AI预测记录</h2><p>把开奖前保存的分析与实际结果放在同一张表中核对。</p></div></div><section class="card history-section"><div class="history-table-box" id="historyPredictions"><div class="history-empty">正在读取历史预判记录…</div></div></section></section>
+
+      <section class="history-panel" data-panel="gaps" hidden><div class="history-panel-head"><button class="history-back">‹ 功能导航</button><div><div class="history-eyebrow">GAP EVENTS</div><h2>超期遗漏统计</h2><p>单3/4＞7期，单2/5＞10期，单1/6＞30期，单0/7＞200期。</p></div></div><section class="card history-section"><div class="history20-note">点击任一类别，查看每一次超过阈值后直到再次出现之间的完整开奖顺序。</div><div id="gapStats" class="gap-card-grid"><div class="history-empty">正在计算5000期超期记录…</div></div><div id="gapDetail" class="history-table-box gap-detail" style="display:none;margin-top:14px"></div></section></section>
+
+      <section class="history-panel" data-panel="patterns" hidden><div class="history-panel-head"><button class="history-back">‹ 功能导航</button><div><div class="history-eyebrow">PATTERN LAB</div><h2>1000期AI规律库</h2><p>滚动样本中的长期分布、遗漏条件率和哈希字符诊断。</p></div></div><section class="card history-section"><div class="history-table-box" id="patternInsights"><div class="history-empty">正在读取遗漏卡期、长期分布和哈希结构…</div></div></section></section>
+
+      <section class="history-panel" data-panel="blocks" hidden><div class="history-panel-head"><button class="history-back">‹ 功能导航</button><div><div class="history-eyebrow">BLOCK DETAIL</div><h2>20组区块数据</h2><p>严格对应当前期第1～20组，缺失组保持等待状态。</p></div></div><section class="card history-section"><div class="group-table-wrap"><table class="group-table"><thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead><tbody id="groupTableBody"><tr><td colspan="4">等待数据</td></tr></tbody></table></div></section></section>
+
+      <section class="history-panel" data-panel="verify" hidden><div class="history-panel-head"><button class="history-back">‹ 功能导航</button><div><div class="history-eyebrow">MODEL CHECK</div><h2>AI验证统计</h2><p>只统计开奖前已保存的预测，并同时观察当前期1～18组描述性分布。</p></div></div><section class="card history-section"><div class="history-status" id="historyModel">正在读取历史模型数据…</div><div class="verify-divider">当前期1～18组分布</div><div class="prob-grid" id="probGrid"><div class="prob-item" data-prob-single="3">单3<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="4">单4<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="5">单5<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="2">单2<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="0">单0<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="7">单7<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="1">单1<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div></div></section></section>
     </main>
   </div>
 <script>
@@ -81,12 +87,25 @@
   var historyTab=document.getElementById('historyTab');
   var tornContent=document.getElementById('tornContent');
   var historyContent=document.getElementById('historyContent');
+  var historyHub=document.getElementById('historyHub');
+  function openHistoryPanel(name){
+    if(historyHub)historyHub.hidden=true;
+    document.querySelectorAll('.history-panel').forEach(function(p){p.hidden=p.getAttribute('data-panel')!==name;});
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  function closeHistoryPanel(){
+    document.querySelectorAll('.history-panel').forEach(function(p){p.hidden=true;});
+    if(historyHub)historyHub.hidden=false;
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  document.querySelectorAll('[data-history-panel]').forEach(function(b){b.onclick=function(){openHistoryPanel(b.getAttribute('data-history-panel'));loadHistoryPage(true);};});
+  document.querySelectorAll('.history-back').forEach(function(b){b.onclick=closeHistoryPanel;});
   function selectTab(isTorn){
     if(isTorn){tornTab.classList.add('active');historyTab.classList.remove('active');tornContent.hidden=false;historyContent.hidden=true;}
     else{historyTab.classList.add('active');tornTab.classList.remove('active');historyContent.hidden=false;tornContent.hidden=true;}
   }
   tornTab.onclick=function(){selectTab(true);};
-  historyTab.onclick=function(){selectTab(false);loadHistoryPage();};
+  historyTab.onclick=function(){selectTab(false);closeHistoryPanel();loadHistoryPage();};
   setInterval(function(){if(historyContent && !historyContent.hidden)loadHistoryPage();},10000);
 
   function text(id,value){var el=document.getElementById(id);if(el)el.textContent=(value===null||value===undefined||value==='')?'--':String(value);}
