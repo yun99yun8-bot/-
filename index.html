@@ -25,6 +25,7 @@
         <div class="result-grid" aria-label="七个开奖结果">
           <div class="result-box" data-result="0">--</div><div class="result-box" data-result="1">--</div><div class="result-box" data-result="2">--</div><div class="result-box" data-result="3">--</div><div class="result-box" data-result="4">--</div><div class="result-box" data-result="5">--</div><div class="result-box" data-result="6">--</div>
         </div>
+        <div class="tail-schedule" id="tailSchedule">区块尾数切换：等待数据</div>
       </section>
 
       <section class="card ai-home-card v91-ai-card">
@@ -133,7 +134,7 @@
     var ph='<table class="group-table history-table"><thead><tr><th>期号</th><th>17组结论</th><th>10秒AI</th><th>AI前三</th><th>实际</th><th>验证</th></tr></thead><tbody>';
     for(var i=0;i<rows.length;i++){var r=rows[i],p=String(r.period).padStart(4,'0');
       if(r.officialSaved)dh+='<tr><td><b>'+p+'</b></td><td><b>单'+r.actualSingle+'</b></td><td class="nums-cell">'+((r.numbers||[]).join(' ')||'--')+'</td><td class="block-col">'+r.targetBlock+'</td></tr>';
-      if(r.predictionSaved)ph+='<tr><td>'+p+'</td><td>'+(r.conclusion17!=null?('单'+r.conclusion17):'--')+'</td><td>'+(r.aiAnalysis!=null?'单'+r.aiAnalysis:'--')+'</td><td>'+((r.top3||[]).map(function(v){return '单'+v;}).join(' / ')||'--')+'</td><td>'+(r.actualSingle!=null?'单'+r.actualSingle:'待开奖')+'</td><td>'+(r.actualSingle!=null?(r.hit?'✓ 对':'✕ 错'):'待验证')+'</td></tr>';
+      if(r.predictionSaved)ph+='<tr><td>'+p+'</td><td>'+(r.conclusion17!=null?('单'+r.conclusion17):'--')+'</td><td>'+(r.aiAnalysis!=null?'单'+r.aiAnalysis:'--')+'</td><td>'+((r.top3||[]).map(function(v){return '单'+v;}).join(' / ')||'--')+'</td><td>'+(r.actualSingle!=null?'单'+r.actualSingle:'待开奖')+'</td><td>'+(r.predictionStale?'旧区块记录':(r.verified?(r.hit?'✓ 对':'✕ 错'):'未验证'))+'</td></tr>';
     }
     if(!rows.length){dh+='<tr><td colspan="4">暂无历史开奖记录</td></tr>';ph+='<tr><td colspan="6">暂无历史AI记录</td></tr>';} dh+='</tbody></table>'; ph+='</tbody></table>';
     document.getElementById('historyDraws').innerHTML=dh; document.getElementById('historyPredictions').innerHTML=ph;
@@ -379,6 +380,11 @@
   }
   function render(data){
     var rp=String(data.currentPeriod||'').padStart(4,'0');
+    var ts=data.tailSchedule;
+    if(ts && ts.nextSwitch){
+      var next=ts.nextSwitch;
+      text('tailSchedule','本期目标区块：'+ts.tail+'尾'+(ts.estimated?'（切换起点按平均推算）':'')+' · 下次预计 '+next.date+' '+next.timeCN+'（第'+next.period+'期）切换');
+    }
     // A reconnect response may intentionally preserve the last official result,
     // but current-period analytics must never be painted from a prior minute.
     if(data.stale && data.groupPeriodKey && String(data.groupPeriodKey).slice(-4)!==rp){

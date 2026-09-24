@@ -63,7 +63,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.4-historical-hash-research-1'
+MODEL_VERSION = 'v9.4.3-result-record-recalibration-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -428,35 +428,43 @@ def previous_official_result(date_str, period, lookback=3):
     return None
 
 
-def period_target_block(date_str, period):
-    """Return the best-known platform group-20 block from confirmed anchors.
+TAIL_ANCHOR_INDEX = period_index('2026-09-24', 481)
+TAIL_INTERVAL_PERIODS = (period_index('2026-09-24', 1201) - TAIL_ANCHOR_INDEX) // 2
+TAIL_SEQUENCE = (6, 4, 2, 0, 8)
 
-    Important: the platform has occasional +18 transitions. We only encode
-    transitions whose location is known; we never invent the location of the
-    observed two-block shift between period 0551 and 1001. Current/live periods
-    are anchored from 1001, with the confirmed 1200->1201 +18 transition.
+
+def tail_schedule(date_str, period):
+    """Average six-hour phase; estimates are explicitly separate from observations."""
+    idx = period_index(date_str, period)
+    if idx < TAIL_ANCHOR_INDEX:
+        return {'tail': 8, 'phaseStart': None, 'nextSwitch': _tail_boundary(TAIL_ANCHOR_INDEX),
+                'estimated': idx != period_index('2026-09-24', 480), 'intervalPeriods': TAIL_INTERVAL_PERIODS}
+    phase = (idx - TAIL_ANCHOR_INDEX) // TAIL_INTERVAL_PERIODS
+    start = TAIL_ANCHOR_INDEX + phase * TAIL_INTERVAL_PERIODS
+    return {'tail': TAIL_SEQUENCE[phase % len(TAIL_SEQUENCE)],
+            'phaseStart': _tail_boundary(start), 'nextSwitch': _tail_boundary(start + TAIL_INTERVAL_PERIODS),
+            'estimated': start not in (TAIL_ANCHOR_INDEX, period_index('2026-09-24', 1201)),
+            'intervalPeriods': TAIL_INTERVAL_PERIODS}
+
+
+def _tail_boundary(index):
+    ordinal, zero = divmod(index, 1440)
+    d = date.fromordinal(ordinal)
+    p = zero + 1
+    return {'date': d.isoformat(), 'period': f'{p:04d}', 'timeCN': f'{p // 60:02d}:{p % 60:02d}'}
+
+
+def period_target_block(date_str, period):
+    """Twenty blocks per period, with a two-block correction per tail switch.
+
+    The 360-period switch interval is an estimate based on two confirmed
+    transitions. Confirmed sample anchors are tested separately below.
     """
-    idx=period_index(date_str,int(period))
-    i480=period_index('2026-09-24',480)
-    i481=period_index('2026-09-24',481)
-    i551=period_index('2026-09-24',551)
-    i1001=period_index('2026-09-24',1001)
-    i1201=period_index('2026-09-24',1201)
-    if idx <= i480:
-        return 86511888 + (idx-i480)*20
-    if i481 <= idx <= i551:
-        return 86511906 + (idx-i481)*20
-    # The exact +18 transition between 0551 and 1001 was not observed. For
-    # that historical gap, use the nearest confirmed anchor rather than claim
-    # a fabricated transition point.
-    if idx < i1001:
-        if idx-i551 <= i1001-idx:
-            return 86513306 + (idx-i551)*20
-        return 86522304 + (idx-i1001)*20
-    block=86522304 + (idx-i1001)*20
-    if idx >= i1201:
-        block -= 2
-    return block
+    idx = period_index(date_str, int(period))
+    if idx < TAIL_ANCHOR_INDEX:
+        return 86511888 + (idx - period_index('2026-09-24', 480)) * 20
+    switches = (idx - TAIL_ANCHOR_INDEX) // TAIL_INTERVAL_PERIODS
+    return 86511906 + (idx - TAIL_ANCHOR_INDEX) * 20 - 2 * switches
 
 def get_db_pool():
     """Create a small thread-safe PostgreSQL pool lazily.
@@ -789,7 +797,7 @@ def get_db_blocks(numbers):
         return {}
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT block_number, block_hash, numbers, single_count FROM tron_blocks WHERE block_number = ANY(%s)", (nums,))
+            cur.execute("SELECT block_number, block_hash, block_time, numbers, single_count FROM tron_blocks WHERE block_number = ANY(%s)", (nums,))
             return {int(r['block_number']): r for r in cur.fetchall()}
     finally:
         db_release(conn)
@@ -902,10 +910,10 @@ def rebuild_omission_runtime():
         if conn is None: return False
         with conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""SELECT period_key,period_date,period_no,single_count
+                cur.execute("""SELECT period_key,period_date,period_no,target_block,single_count
                                FROM period_groups WHERE group_no=20
                                ORDER BY period_date ASC,period_no ASC""")
-                rows=cur.fetchall()
+                rows=[r for r in cur.fetchall() if calibrated_group20_row(r)]
                 if not rows: return False
                 omission={str(i):0 for i in range(8)}
                 for r in rows:
@@ -949,12 +957,12 @@ def omission_engine_worker():
             with conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     if last_date is None or last_no is None:
-                        cur.execute("SELECT period_key,period_date,period_no,single_count FROM period_groups WHERE group_no=20 ORDER BY period_date,period_no")
+                        cur.execute("SELECT period_key,period_date,period_no,target_block,single_count FROM period_groups WHERE group_no=20 ORDER BY period_date,period_no")
                     else:
-                        cur.execute("""SELECT period_key,period_date,period_no,single_count FROM period_groups
+                        cur.execute("""SELECT period_key,period_date,period_no,target_block,single_count FROM period_groups
                                        WHERE group_no=20 AND (period_date>%s OR (period_date=%s AND period_no>%s))
                                        ORDER BY period_date,period_no""",(last_date,last_date,int(last_no)))
-                    rows=cur.fetchall()
+                    rows=[r for r in cur.fetchall() if calibrated_group20_row(r)]
                     processed=int(snap.get('processed_count') or 0)
                     for r in rows:
                         single=int(r['single_count'])
@@ -1090,6 +1098,77 @@ def persist_period_groups(date_str,period,groups,target20):
                 """,rows)
         return len(rows)
     finally: db_release(conn)
+
+
+def calibrated_group20_row(row):
+    """Exclude period-group results saved under an obsolete target mapping."""
+    ds=row['period_date'].isoformat() if hasattr(row['period_date'],'isoformat') else str(row['period_date'])
+    return int(row['target_block'])==period_target_block(ds,int(row['period_no']))
+
+
+def repair_calibrated_official_records(limit=5000):
+    """Rebuild completed periods mapped with an older tail schedule from raw blocks.
+
+    Keep the original block archive. Do not replace an old result with a guess:
+    a period is rewritten only when its newly calibrated group-20 block exists.
+    """
+    conn=db_connect()
+    if conn is None:return 0
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT period_key,period_date,period_no,target_block
+                           FROM period_groups WHERE group_no=20
+                           ORDER BY period_date DESC,period_no DESC LIMIT %s""",(int(limit),))
+            saved=cur.fetchall()
+    finally: db_release(conn)
+    mismatches=[]
+    for r in saved:
+        ds=r['period_date'].isoformat() if hasattr(r['period_date'],'isoformat') else str(r['period_date'])
+        target=period_target_block(ds,int(r['period_no']))
+        if int(r['target_block'])!=target:
+            mismatches.append((str(r['period_key']),ds,int(r['period_no']),target))
+    if not mismatches:return 0
+    # One indexed read for all candidate blocks; missing raw blocks remain untouched.
+    needed=[target-(20-g) for _,_,_,target in mismatches for g in range(1,21)]
+    raw=get_db_blocks(needed)
+    repaired=0
+    for key,ds,p,target in mismatches:
+        if target not in raw:
+            # No substitute result: keep the archived raw blocks and mark the
+            # old wrong-target prediction unverified until data is available.
+            conn=db_connect()
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""UPDATE ai_predictions SET actual_single=NULL,verified_at=NULL
+                                       WHERE period_key=%s AND target_block<>%s""",(key,target))
+            finally: db_release(conn)
+            continue
+        groups={}
+        for g in range(1,21):
+            bn=target-(20-g); row=raw.get(bn)
+            if row is None:continue
+            nums=row['numbers'] if isinstance(row['numbers'],list) else json.loads(row['numbers'])
+            groups[str(g)]={'blockNumber':bn,'block':row['block_hash'],
+                            'numbers':nums,'singleCount':int(row['single_count'])}
+        persist_period_groups(ds,p,groups,target)
+        conn=db_connect()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM period_groups WHERE period_key=%s AND target_block<>%s",(key,target))
+                    # The old prediction remains for audit, but its wrong-block
+                    # verification is invalid and must not inflate accuracy.
+                    cur.execute("""UPDATE ai_predictions SET actual_single=NULL,verified_at=NULL
+                                   WHERE period_key=%s AND target_block<>%s""",(key,target))
+                    cur.execute("UPDATE period_runtime SET target_block=%s,updated_at=NOW() WHERE period_key=%s",(target,key))
+            repaired+=1
+        finally: db_release(conn)
+    if mismatches:
+        rebuild_omission_runtime()
+    if repaired:
+        record_system_event('tail_calibration_records_repaired',None,{'periods':repaired,'candidates':len(mismatches)})
+    return repaired
 
 
 def repair_recent_periods(limit=6):
@@ -1282,7 +1361,7 @@ def supervisor_worker():
 
 def smart_db_worker():
     """Continuously materialize current period and repair recent holes."""
-    last_repair=0
+    last_repair=0; last_calibration=0
     while True:
         worker_touch('smart-db')
         try:
@@ -1293,6 +1372,9 @@ def smart_db_worker():
             if time.time()-last_repair > 30:
                 last_repair=time.time()
                 repair_recent_periods(6)
+            if time.time()-last_calibration > 1800:
+                last_calibration=time.time()
+                repair_calibrated_official_records()
         except Exception as exc:
             with _runtime_health_lock:
                 _runtime_health['lastDbError']=str(exc)[:300]
@@ -1328,15 +1410,18 @@ def hash_research_worker():
             conn=db_connect(retries=0)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""WITH periods AS (
-                    SELECT period_key,period_date,period_no FROM period_groups
+                    SELECT period_key,period_date,period_no,target_block FROM period_groups
                     WHERE group_no=20 AND period_key<%s
                     ORDER BY period_date DESC,period_no DESC LIMIT 2500)
-                    SELECT g.period_key,g.group_no,g.block_hash,g.single_count
+                    SELECT g.period_key,g.group_no,g.block_hash,g.single_count,
+                           p.period_date,p.period_no,p.target_block
                     FROM periods p JOIN period_groups g ON g.period_key=p.period_key
-                    WHERE g.group_no BETWEEN 1 AND 17 OR g.group_no=20
+                    WHERE (g.group_no BETWEEN 1 AND 17 OR g.group_no=20)
+                      AND g.target_block=p.target_block
                     ORDER BY p.period_date,p.period_no,g.group_no""",(current_key,))
                 rows=cur.fetchall()
             db_release(conn);conn=None
+            rows=[r for r in rows if calibrated_group20_row(r)]
             snapshot=hash_research.train_snapshot(hash_research.build_examples(rows))
             snapshot['sourceRows']=len(rows)
             conn=db_connect(retries=0)
@@ -1989,7 +2074,8 @@ def research_model_performance(limit=500):
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""SELECT p.actual_single,p.ensemble_detail FROM ai_predictions p
                            JOIN tron_blocks b ON b.block_number=p.target_block
-                           WHERE p.actual_single IS NOT NULL AND p.ensemble_detail IS NOT NULL
+                           WHERE p.actual_single IS NOT NULL AND p.actual_single=b.single_count
+                             AND p.ensemble_detail IS NOT NULL
                              AND p.model_version LIKE 'v9.%%'
                              AND p.locked_at IS NOT NULL AND b.block_time IS NOT NULL
                              AND p.locked_at < b.block_time
@@ -2242,17 +2328,31 @@ def verify_prediction(date_str, period, official):
         with conn:
             with conn.cursor() as cur:
                 cur.execute("""UPDATE ai_predictions SET actual_single=%s,verified_at=COALESCE(verified_at,NOW())
-                               WHERE period_key=%s AND actual_single IS NULL""",
-                            (int(official['singleCount']),key))
+                               WHERE period_key=%s AND target_block=%s AND actual_single IS NULL""",
+                            (int(official['singleCount']),key,int(official['blockNumber'])))
                 if cur.rowcount > 0:
                     updated=True
                 else:
-                    cur.execute("SELECT actual_single FROM ai_predictions WHERE period_key=%s",(key,))
+                    cur.execute("SELECT actual_single FROM ai_predictions WHERE period_key=%s AND target_block=%s",
+                                (key,int(official['blockNumber'])))
                     row=cur.fetchone()
                     updated=bool(row and row[0] is not None)
     finally:
         db_release(conn)
     return updated
+
+
+def historical_prediction_verified(prediction, block, target):
+    """A history hit requires the same target, real result and pre-result lock."""
+    if not prediction or not block:return False
+    try:
+        locked=prediction.get('locked_at'); published=block.get('block_time')
+        return (int(prediction['target_block'])==int(target)
+                and locked is not None and published is not None and locked < published
+                and prediction.get('actual_single') is not None
+                and int(prediction['actual_single'])==int(block['single_count']))
+    except (TypeError,ValueError,KeyError):
+        return False
 
 
 def prediction_summary(date_str, period, groups, target20, official, ui_countdown=None):
@@ -2283,7 +2383,8 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
                 cur.execute("SELECT * FROM ai_predictions WHERE period_key=%s",(key,)); row=cur.fetchone()
                 cur.execute("""SELECT p.ai_analysis,p.prediction_top3,p.actual_single,p.ensemble_detail
                     FROM ai_predictions p JOIN tron_blocks b ON b.block_number=p.target_block
-                    WHERE p.actual_single IS NOT NULL AND p.model_version LIKE 'v9.%%'
+                    WHERE p.actual_single IS NOT NULL AND p.actual_single=b.single_count
+                      AND p.model_version LIKE 'v9.%%'
                       AND p.locked_at IS NOT NULL AND b.block_time IS NOT NULL
                       AND p.locked_at < b.block_time
                     ORDER BY p.period_date DESC,p.period_no DESC LIMIT 500""")
@@ -2295,10 +2396,12 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND data_conclusion=actual_single) data_hits
                     FROM ai_predictions p JOIN tron_blocks b ON b.block_number=p.target_block
                     WHERE p.model_version LIKE 'v9.%%' AND p.locked_at IS NOT NULL
+                      AND p.actual_single=b.single_count
                       AND b.block_time IS NOT NULL AND p.locked_at < b.block_time"""); agg=cur.fetchone()
                 cur.execute("""SELECT p.period_no,p.prediction_top3,p.actual_single
                     FROM ai_predictions p JOIN tron_blocks b ON b.block_number=p.target_block
-                    WHERE p.actual_single IS NOT NULL AND p.prediction_top3 IS NOT NULL
+                    WHERE p.actual_single IS NOT NULL AND p.actual_single=b.single_count
+                      AND p.prediction_top3 IS NOT NULL
                       AND p.model_version LIKE 'v9.%%' AND p.locked_at IS NOT NULL
                       AND b.block_time IS NOT NULL AND p.locked_at < b.block_time
                     ORDER BY p.verified_at DESC NULLS LAST,p.period_date DESC,p.period_no DESC LIMIT 1""")
@@ -2451,8 +2554,7 @@ def update_omission(state, official):
 def target_block_number(date_str, period, state, latest_number):
     """Map a platform period to its confirmed group-20/result block.
 
-    Uses the same piecewise calibration as period_target_block(), including
-    the confirmed +18 transition from 2026-09-24 period 1200 to 1201.
+    Uses the confirmed anchors and the estimated 360-period tail schedule.
     """
     try:
         return period_target_block(date_str, int(period))
@@ -2559,7 +2661,7 @@ def draw():
                     'sourceBlocks': [int(groups[str(i)]['blockNumber']) for i in range(1,18)]}
         payload = {
             **state, 'platformPeriod': platform_period, 'currentPeriod': period_str, 'groupPeriodKey': f'{date_str}:{period_str}',
-            'targetResultBlock': target20, 'officialReady': bool(official),
+            'targetResultBlock': target20, 'tailSchedule': tail_schedule(date_str, period), 'officialReady': bool(official),
             'resultNumbers': result_obj.get('numbers', []) if result_obj else [],
             'resultSingleCount': result_obj.get('singleCount') if result_obj else None,
             'resultBlockNumber': result_obj.get('blockNumber') if result_obj else None,
@@ -2835,7 +2937,7 @@ def history_summary():
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""SELECT period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,
-                              prediction_top3,actual_single,created_at,verified_at,conclusion17,conclusion17_mode
+                              prediction_top3,actual_single,created_at,locked_at,verified_at,conclusion17,conclusion17_mode
                               FROM ai_predictions ORDER BY period_date DESC,period_no DESC LIMIT 5000""")
                 for pr in cur.fetchall(): pred_by_key[str(pr.get('period_key') or '')]=pr
         finally: db_release(conn)
@@ -2852,13 +2954,15 @@ def history_summary():
             try: nums=json.loads(nums)
             except Exception: nums=[]
         official_single=int(br['single_count']) if br and br.get('single_count') is not None else None
-        stored=(pr or {}).get('actual_single')
-        actual=official_single if official_single is not None else (int(stored) if stored is not None else None)
+        actual=official_single
+        verified=historical_prediction_verified(pr,br,target)
+        stale_prediction=bool(pr and int(pr['target_block'])!=int(target))
         top=[int(x) for x in top][:3]
         out.append({'date':ds,'period':pno,'targetBlock':int(target),'dataConclusion':(pr or {}).get('data_conclusion'),
                     'aiAnalysis':(pr or {}).get('ai_analysis'),'conclusion17':(pr or {}).get('conclusion17'),
                     'conclusion17Mode':(pr or {}).get('conclusion17_mode'),'top3':top,'actualSingle':actual,'numbers':nums,
-                    'hit':bool(actual is not None and actual in top),'verified':bool(pr and actual is not None),
+                    'hit':bool(verified and actual in top),'verified':verified,
+                    'predictionStale':stale_prediction,
                     'predictionSaved':bool(pr),'officialSaved':bool(br)})
     gap_rows=[]
     for ds,pno,target in gap_periods:
