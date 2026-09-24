@@ -29,6 +29,8 @@
         </div>
         <div class="conclusion" id="statsConclusion">结论：等待第1～18组数据</div>
         <div class="conclusion ai-conclusion" id="aiConclusion">AI分析：等待数据</div>
+        <div class="stats-note" id="aiTop3">AI评分前三：等待数据</div>
+        <div class="stats-note" id="aiAllScores">单0～单7评分：等待数据</div>
         <div class="stats-note" id="aiAccuracy">AI历史验证：暂无已验证样本</div>
         <div class="stats-note" id="group20Matches">与第20组相同：等待第20组</div>
       </section>
@@ -127,7 +129,15 @@
     for(var j=0;j<highest.length;j++)names.push('单'+highest[j].single);
     text('statsConclusion',highest.length?'结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）':'结论：等待第1～18组数据');
     var ai=data.aiAnalysis||{};
-    text('aiConclusion',ai.single!=null?'AI分析：单'+ai.single+'（历史统计倾向）':'AI分析：等待数据');
+    var scoreMap=ai.scores||{}, ranked=[];
+    for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
+    ranked.sort(function(a,b){return b.score-a.score || a.single-b.single;});
+    var bestScore=(ai.single!=null && scoreMap[String(ai.single)]!=null)?Number(scoreMap[String(ai.single)]).toFixed(2):'--';
+    text('aiConclusion',ai.single!=null?'AI分析：单'+ai.single+'｜评分 '+bestScore+'%':'AI分析：等待数据');
+    var topParts=[]; for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
+    text('aiTop3',topParts.length?'AI评分前三：'+topParts.join('　'):'AI评分前三：等待数据');
+    var allParts=[]; for(var ax=0;ax<=7;ax++) allParts.push('单'+ax+' '+Number(scoreMap[String(ax)]||0).toFixed(1)+'%');
+    text('aiAllScores','单0～单7评分：'+allParts.join('｜'));
     var rate=ai.hitRate!=null?Number(ai.hitRate).toFixed(2)+'%':'--';
     text('aiAccuracy','AI历史验证：'+Number(ai.hits||0)+'/'+Number(ai.verifiedSample||0)+'（'+rate+'）');
     var same=Array.isArray(ai.sameAsGroup20)?ai.sameAsGroup20:[];

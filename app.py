@@ -165,10 +165,18 @@ def period_target_block(date_str, period):
     For the current/live range we therefore anchor to 1001 and advance +20
     per period until the user reports another adjustment.
     """
-    # Continuous +20 calibration from the confirmed anchor. If the platform
-    # makes another exceptional +18 adjustment, update this calibration.
+    # Piecewise calibration from confirmed platform screenshots.
+    # 1001 -> 86522304, then +20 through period 1200.
+    # 1200 -> 86526284 and 1201 -> 86526302, so the 1200->1201 step is +18.
+    # From 1201 onward we continue the normal +20 cadence until another
+    # platform adjustment is observed.
     anchor_idx = period_index('2026-09-24', 1001)
-    return 86522304 + (period_index(date_str, int(period)) - anchor_idx) * 20
+    idx = period_index(date_str, int(period))
+    block = 86522304 + (idx - anchor_idx) * 20
+    adjustment_idx = period_index('2026-09-24', 1201)
+    if idx >= adjustment_idx:
+        block -= 2
+    return block
 
 
 def get_db_pool():
@@ -552,38 +560,84 @@ def get_historical_official_singles(date_str, period, limit=720):
 
 
 def ai_analysis_from_data(groups, historical):
-    """Deterministic statistical tendency, not a guarantee/prediction.
+    """Adaptive 8-class scoring model.
 
-    Score = 55% current groups 1-18 frequency + 35% retained historical
-    official frequency + 10% recent omission tendency. Ties use the lower
-    single-count only as a stable deterministic tie-breaker.
+    Every class 单0..单7 is scored independently.  The model combines:
+    - current 1-18 group distribution
+    - short/medium/long historical windows
+    - omission/recency
+    - transition behaviour after the most recent official result
+    - recent-vs-long momentum
+
+    The returned percentages are normalized *model scores*, not guaranteed
+    probabilities.  No class is artificially promoted merely for variety.
     """
-    current = [int(groups[str(i)]['singleCount']) for i in range(1,19)
+    current = [int(groups[str(i)]['singleCount']) for i in range(1, 19)
                if str(i) in groups and groups[str(i)].get('singleCount') is not None]
     if not current:
         return None, {}
-    hc={i:0 for i in range(8)}; cc={i:0 for i in range(8)}
-    for x in current: cc[x]+=1
-    for x in historical:
-        if 0 <= int(x) <= 7: hc[int(x)]+=1
-    recent=list(historical[:40])
-    omission={i:0 for i in range(8)}
-    for i in range(8):
-        n=0
-        for x in recent:
-            if x==i: break
-            n+=1
-        omission[i]=n
-    max_omit=max(omission.values()) if omission else 0
-    scores={}
-    for i in range(8):
-        cur=cc[i]/len(current) if current else 0
-        hist=hc[i]/len(historical) if historical else 0
-        omit=omission[i]/max_omit if max_omit else 0
-        scores[i]=0.55*cur+0.35*hist+0.10*omit
-    pick=max(range(8), key=lambda i:(scores[i],-i))
-    return pick, {str(i):round(scores[i]*100,2) for i in range(8)}
 
+    hist = [int(x) for x in historical if 0 <= int(x) <= 7]
+
+    def dist(values):
+        counts = [0] * 8
+        for x in values:
+            counts[x] += 1
+        n = len(values)
+        return [(counts[i] + 1.0) / (n + 8.0) for i in range(8)]  # Laplace smoothing
+
+    cur_d = dist(current)
+    d20 = dist(hist[:20])
+    d50 = dist(hist[:50])
+    d100 = dist(hist[:100])
+    dall = dist(hist)
+
+    # How long each class has been absent from official group-20 results.
+    omission = [0] * 8
+    cap = max(20, min(80, len(hist)))
+    for i in range(8):
+        n = 0
+        for x in hist[:cap]:
+            if x == i:
+                break
+            n += 1
+        omission[i] = n
+    max_omit = max(omission) if omission else 0
+
+    # Empirical next-result distribution conditional on the latest official
+    # result. Historical is newest -> oldest, so hist[j] is followed by hist[j-1].
+    transition = [0] * 8
+    transition_n = 0
+    if hist:
+        last = hist[0]
+        for j in range(1, min(len(hist), 400)):
+            if hist[j] == last:
+                transition[hist[j-1]] += 1
+                transition_n += 1
+    trans_d = [(transition[i] + 1.0) / (transition_n + 8.0) for i in range(8)]
+
+    raw = {}
+    for i in range(8):
+        # Positive momentum means the class is appearing more in the recent
+        # window than in the long-run window.  It is deliberately bounded.
+        momentum = max(-0.12, min(0.12, d20[i] - dall[i]))
+        omit_signal = (omission[i] / max_omit) if max_omit else 0.0
+        raw[i] = max(0.000001,
+            0.24 * cur_d[i] +
+            0.18 * d20[i] +
+            0.15 * d50[i] +
+            0.12 * d100[i] +
+            0.12 * dall[i] +
+            0.11 * trans_d[i] +
+            0.05 * omit_signal +
+            0.03 * (0.5 + momentum)
+        )
+
+    total = sum(raw.values()) or 1.0
+    scores = {i: raw[i] / total * 100.0 for i in range(8)}
+    ranked = sorted(range(8), key=lambda i: (-scores[i], i))
+    pick = ranked[0]
+    return pick, {str(i): round(scores[i], 2) for i in range(8)}
 
 def save_prediction_if_ready(date_str, period, groups, target20):
     stats=stats_from_groups(groups)
@@ -704,34 +758,16 @@ def update_omission(state, official):
 
 
 def target_block_number(date_str, period, state, latest_number):
-    """Map platform periods to the corresponding TRON result block.
+    """Map a platform period to its confirmed group-20/result block.
 
-    Confirmed anchor supplied by the user:
-      2609240481 -> 86511906
-      2609240482 -> 86511926
-    Every following platform period advances exactly 20 TRON blocks.
-    The same cadence is used across a day boundary; only the platform
-    period number resets to 0001.
+    Uses the same piecewise calibration as period_target_block(), including
+    the confirmed +18 transition from 2026-09-24 period 1200 to 1201.
     """
-    # If we already have a confirmed prior period, continue from that exact
-    # block. This also handles the 1440 -> next-day 0001 transition.
-    if state and state.get('date') and state.get('period') and state.get('blockNumber') is not None:
-        try:
-            elapsed = period_index(date_str, int(period)) - period_index(state['date'], int(state['period']))
-            if elapsed >= 1:
-                return int(state['blockNumber']) + elapsed * 20
-        except Exception:
-            pass
-
-    # Current-day live calibration from the supplied platform screenshot:
-    # period 1001 is exactly block 86522304.
-    if date_str == '2026-09-24':
-        return 86522304 + (int(period) - 1001) * 20
-
-    # Fresh install on another date: align the chain height to the same
-    # 20-block cadence. Once a real period is confirmed, state becomes the
-    # authoritative anchor for subsequent periods.
-    return int(latest_number) - ((int(latest_number) - 6) % 20)
+    try:
+        return period_target_block(date_str, int(period))
+    except Exception:
+        # Last-resort fallback for an uncalibrated date/range.
+        return int(latest_number) - ((int(latest_number) - 6) % 20)
 
 
 @app.get('/')
