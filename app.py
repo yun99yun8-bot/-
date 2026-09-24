@@ -57,6 +57,8 @@ _history_cache = {'key': None, 'at': 0, 'value': None}
 _history_cache_lock = threading.Lock()
 _ai_summary_cache = {'key': None, 'at': 0, 'value': None}
 _ai_summary_cache_lock = threading.Lock()
+_pending_ai_predictions = {}
+_pending_ai_lock = threading.Lock()
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
 
@@ -599,31 +601,29 @@ def tron_ingest_worker():
         time.sleep(0.5)
 
 def ai_prediction_worker():
-    """Own the complete AI lifecycle independently of any browser.
-
-    It locks once group 17 is available and group 20 is not, then verifies
-    automatically when group 20 arrives. Repeated calls are idempotent.
-    """
+    """Durable backend AI lifecycle with pre-result snapshot + retry persistence."""
     last_verified_key=None
     while True:
         try:
+            flush_pending_ai_predictions()
             date_str,period,_,_=current_period()
             groups,target20=collect_groups_live(date_str,period)
-            official=groups.get('20')
-            key=f'{date_str}:{int(period):04d}'
-            # As soon as the strict 17-group evidence is complete, persist the
-            # conclusion and a prediction row. This guarantees a pre-result row.
+            official=groups.get('20'); key=f'{date_str}:{int(period):04d}'
             if not official and all(str(i) in groups for i in range(1,18)):
                 try: save_conclusion17_if_ready(date_str,period,groups,target20)
                 except Exception: pass
                 try: save_prediction_if_ready(date_str,period,groups,target20,force_backend=True)
                 except Exception: pass
             if official and last_verified_key != key:
+                # Flush first: a prediction captured before group20 may still be
+                # waiting for PostgreSQL. Never declare verification complete
+                # when UPDATE matched zero rows.
+                flush_pending_ai_predictions()
                 try:
-                    verify_prediction(date_str,period,official)
-                    last_verified_key=key
-                    with _ai_summary_cache_lock:
-                        _ai_summary_cache.update({'key':None,'at':0,'value':None})
+                    if verify_prediction(date_str,period,official):
+                        last_verified_key=key
+                        with _ai_summary_cache_lock:
+                            _ai_summary_cache.update({'key':None,'at':0,'value':None})
                 except Exception:
                     pass
         except Exception:
@@ -1141,31 +1141,10 @@ def calibrated_countdown_value():
     return 60 if sec == 0 else 60 - sec
 
 
-def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None, force_backend=False):
-    """Idempotently persist one pre-result prediction for the period.
-
-    The backend worker is authoritative. The UI countdown remains only a
-    display/extra trigger, so closing the page can no longer lose a prediction.
-    """
-    countdown = int(ui_countdown) if ui_countdown is not None else None
-    if not force_backend and countdown != 10:
-        return None
-    if groups.get('20'):
-        return None
-    stats=stats_from_groups(groups)
-    if int(stats.get('sampleSize') or 0) < 1:
-        return None
-    historical=get_historical_official_singles(date_str, period)
-    relation=group20_relation_model(date_str, period)
-    ai,scores=ai_analysis_from_data(groups,historical,relation)
-    if ai is None: return None
-    ranked_top3=sorted(range(8),key=lambda i:(-float(scores.get(str(i),0)),i))[:3]
-    highest=stats.get('highest') or []
-    data_conclusion=int(highest[0]['single']) if len(highest)==1 else None
-    c17=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
-    key=f'{date_str}:{int(period):04d}'
+def _persist_ai_payload(payload):
     conn=db_connect()
-    if conn is None:return None
+    if conn is None:
+        raise RuntimeError('database unavailable')
     try:
         with conn:
             with conn.cursor() as cur:
@@ -1179,27 +1158,93 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
                       sample_size=GREATEST(COALESCE(ai_predictions.sample_size,0),EXCLUDED.sample_size),
                       conclusion17=COALESCE(ai_predictions.conclusion17,EXCLUDED.conclusion17),
                       conclusion17_mode=COALESCE(ai_predictions.conclusion17_mode,EXCLUDED.conclusion17_mode)
-                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3),
-                     int(stats.get('sampleSize') or 0),c17.get('single') if c17 else None,c17.get('mode') if c17 else None))
-    finally: db_release(conn)
+                """,(payload['key'],payload['date'],payload['period'],payload['target20'],
+                     payload['dataConclusion'],payload['ai'],json.dumps(payload['top3']),
+                     payload['sampleSize'],payload.get('c17'),payload.get('c17Mode')))
+    finally:
+        db_release(conn)
+    return True
+
+
+def flush_pending_ai_predictions():
+    """Retry pre-result snapshots even after group20 appears.
+
+    The prediction itself was captured before the result; only persistence is
+    retried. This prevents a transient DB/pool failure in the ~9 second window
+    from permanently losing the period.
+    """
+    with _pending_ai_lock:
+        items=list(_pending_ai_predictions.items())
+    for key,payload in items:
+        try:
+            _persist_ai_payload(payload)
+            with _pending_ai_lock:
+                _pending_ai_predictions.pop(key,None)
+            with _ai_summary_cache_lock:
+                _ai_summary_cache.update({'key':None,'at':0,'value':None})
+        except Exception:
+            pass
+
+
+def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None, force_backend=False):
+    countdown=int(ui_countdown) if ui_countdown is not None else None
+    if not force_backend and countdown != 10:
+        return None
+    if groups.get('20'):
+        return None
+    stats=stats_from_groups(groups)
+    if int(stats.get('sampleSize') or 0) < 1:
+        return None
+    historical=get_historical_official_singles(date_str,period)
+    relation=group20_relation_model(date_str,period)
+    ai,scores=ai_analysis_from_data(groups,historical,relation)
+    if ai is None:return None
+    top3=sorted(range(8),key=lambda i:(-float(scores.get(str(i),0)),i))[:3]
+    highest=stats.get('highest') or []
+    dc=int(highest[0]['single']) if len(highest)==1 else None
+    c17=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
+    key=f'{date_str}:{int(period):04d}'
+    payload={'key':key,'date':date_str,'period':int(period),'target20':int(target20),
+             'dataConclusion':dc,'ai':int(ai),'top3':top3,'sampleSize':int(stats.get('sampleSize') or 0),
+             'c17':c17.get('single') if c17 else None,'c17Mode':c17.get('mode') if c17 else None}
+    # Capture BEFORE touching PostgreSQL. From this point the period can safely
+    # survive DB pool exhaustion, a Render hiccup, or group20 arriving.
+    with _pending_ai_lock:
+        _pending_ai_predictions.setdefault(key,payload)
+    try:
+        _persist_ai_payload(payload)
+        with _pending_ai_lock:
+            _pending_ai_predictions.pop(key,None)
+    except Exception:
+        pass
     with _ai_summary_cache_lock:
         _ai_summary_cache.update({'key':None,'at':0,'value':None})
     return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True,
-            'period':int(period),'lockCountdown':countdown,'lockSource':'backend' if force_backend else 'ui'}
+            'period':int(period),'lockCountdown':countdown,
+            'lockSource':'backend' if force_backend else 'ui'}
 
 
 def verify_prediction(date_str, period, official):
-    if not official: return
+    if not official:return False
     key=f'{date_str}:{int(period):04d}'
     conn=db_connect()
-    if conn is None:return
+    if conn is None:return False
+    updated=False
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute("""UPDATE ai_predictions SET actual_single=%s,verified_at=COALESCE(verified_at,NOW())
                                WHERE period_key=%s AND actual_single IS NULL""",
                             (int(official['singleCount']),key))
-    finally: db_release(conn)
+                if cur.rowcount > 0:
+                    updated=True
+                else:
+                    cur.execute("SELECT actual_single FROM ai_predictions WHERE period_key=%s",(key,))
+                    row=cur.fetchone()
+                    updated=bool(row and row[0] is not None)
+    finally:
+        db_release(conn)
+    return updated
 
 
 def prediction_summary(date_str, period, groups, target20, official, ui_countdown=None):
@@ -1417,7 +1462,7 @@ def draw():
             'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
             'databaseStatus': 'connected', 'stale': False,
             'storage': {'database': True, 'retentionDays': DB_RETENTION_DAYS, 'frontendSource': 'PostgreSQL + memory fallback'},
-            'debug': {'targetBlock': target20, 'fastTarget': dict(_fast_diag)}
+            'debug': {'targetBlock': target20, 'fastTarget': dict(_fast_diag), 'aiPending': len(_pending_ai_predictions)}
         }
         with _draw_cache_lock:
             _draw_cache = dict(payload)
