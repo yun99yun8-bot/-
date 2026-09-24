@@ -61,7 +61,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v6-smartdb-1'
+MODEL_VERSION = 'v7-ensemble-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -386,6 +386,9 @@ def init_db():
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_predictions_date ON ai_predictions(period_date DESC, period_no DESC)")
                 cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS model_version TEXT")
                 cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS confidence REAL")
+                cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS ensemble_detail JSONB")
+                cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS model_weights JSONB")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS period_groups (
                         period_key TEXT NOT NULL,
@@ -1274,8 +1277,8 @@ def _persist_ai_payload(payload):
         with conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size,conclusion17,conclusion17_mode,model_version,locked_at)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                    INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size,conclusion17,conclusion17_mode,model_version,locked_at,confidence,ensemble_detail,model_weights)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s,%s::jsonb,%s::jsonb)
                     ON CONFLICT(period_key) DO UPDATE SET
                       data_conclusion=COALESCE(ai_predictions.data_conclusion,EXCLUDED.data_conclusion),
                       ai_analysis=COALESCE(ai_predictions.ai_analysis,EXCLUDED.ai_analysis),
@@ -1285,7 +1288,9 @@ def _persist_ai_payload(payload):
                       conclusion17_mode=COALESCE(ai_predictions.conclusion17_mode,EXCLUDED.conclusion17_mode)
                 """,(payload['key'],payload['date'],payload['period'],payload['target20'],
                      payload['dataConclusion'],payload['ai'],json.dumps(payload['top3']),
-                     payload['sampleSize'],payload.get('c17'),payload.get('c17Mode'),MODEL_VERSION))
+                     payload['sampleSize'],payload.get('c17'),payload.get('c17Mode'),MODEL_VERSION,
+                         payload.get('confidence'),json.dumps(payload.get('ensemble') or {}),
+                         json.dumps((payload.get('ensemble') or {}).get('weights') or {})))
     finally:
         db_release(conn)
     return True
@@ -1311,6 +1316,60 @@ def flush_pending_ai_predictions():
             pass
 
 
+
+def _norm_scores(scores):
+    vals={int(k):max(0.0,float(v)) for k,v in (scores or {}).items() if str(k).isdigit() or isinstance(k,int)}
+    total=sum(vals.values())
+    if total <= 0:return {i:1/8 for i in range(8)}
+    return {i:vals.get(i,0.0)/total for i in range(8)}
+
+def v7_ensemble(groups, historical, relation=None):
+    """Leakage-safe ensemble: only current pre-result groups + prior official history."""
+    hist=[int(x) for x in (historical or []) if 0 <= int(x) <= 7]
+    recent=hist[-120:]
+    long=hist[-1000:]
+    # Long/short empirical distributions with smoothing.
+    long_s={i:1.0 for i in range(8)}
+    short_s={i:1.0 for i in range(8)}
+    for x in long: long_s[x]+=1
+    for x in recent: short_s[x]+=1
+    long_s=_norm_scores(long_s); short_s=_norm_scores(short_s)
+
+    # Current 1..17 structural distribution.
+    struct={i:1.0 for i in range(8)}
+    for g in range(1,18):
+        row=groups.get(str(g))
+        if row: struct[int(row['singleCount'])]+=1
+    struct=_norm_scores(struct)
+
+    # Transition model P(next | last official), smoothed.
+    trans={i:1.0 for i in range(8)}
+    if len(hist)>=2:
+        prev=hist[-1]
+        for a,b in zip(hist[:-1],hist[1:]):
+            if a==prev: trans[b]+=1
+    trans=_norm_scores(trans)
+
+    # Omission pressure as a weak feature, deliberately capped.
+    omit={i:1.0 for i in range(8)}
+    for i in range(8):
+        gap=0
+        for x in reversed(hist):
+            if x==i: break
+            gap+=1
+        omit[i]=1.0+min(gap,40)/40.0
+    omit=_norm_scores(omit)
+
+    weights={'long':0.20,'short':0.22,'structure17':0.32,'transition':0.16,'omission':0.10}
+    parts={'long':long_s,'short':short_s,'structure17':struct,'transition':trans,'omission':omit}
+    score={i:sum(weights[n]*parts[n][i] for n in weights) for i in range(8)}
+    order=sorted(range(8), key=lambda i:score[i], reverse=True)
+    # Confidence is separation, not a claimed win probability.
+    confidence=max(0.0,min(1.0,(score[order[0]]-score[order[1]])*8.0))
+    return {'single':order[0],'top3':order[:3],
+            'scores':{str(i):round(score[i]*100,3) for i in range(8)},
+            'confidence':round(confidence*100,1),'weights':weights,'components':parts}
+
 def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None, force_backend=False):
     countdown=int(ui_countdown) if ui_countdown is not None else None
     if not force_backend and countdown != 10:
@@ -1329,8 +1388,17 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
     dc=int(highest[0]['single']) if len(highest)==1 else None
     c17=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
     key=f'{date_str}:{int(period):04d}'
+    # V7 ensemble uses only information available before group20.
+    try:
+        _v7hist=get_historical_official_singles(date_str, period)
+        _v7=v7_ensemble(groups,_v7hist)
+        ai=int(_v7['single'])
+        top3=[int(x) for x in _v7['top3']]
+    except Exception:
+        _v7=None
     payload={'key':key,'date':date_str,'period':int(period),'target20':int(target20),
-             'dataConclusion':dc,'ai':int(ai),'top3':top3,'sampleSize':int(stats.get('sampleSize') or 0),
+             'dataConclusion':dc,'ai':int(ai),'top3':top3,
+             'confidence': (_v7.get('confidence') if _v7 else None), 'ensemble': _v7,'sampleSize':int(stats.get('sampleSize') or 0),
              'c17':c17.get('single') if c17 else None,'c17Mode':c17.get('mode') if c17 else None}
     # Capture BEFORE touching PostgreSQL. From this point the period can safely
     # survive DB pool exhaustion, a Render hiccup, or group20 arriving.
@@ -1622,7 +1690,7 @@ def draw():
                       'aiPending': len(_pending_ai_predictions),
                       'ai17Ready': bool(ai17),
                       'aiFrozen': bool(ai_info.get('frozen')) if isinstance(ai_info, dict) else False,
-                      'modelVersion': MODEL_VERSION, 'smartDb': dict(_runtime_health)}
+                      'modelVersion': MODEL_VERSION, 'smartDb': dict(_runtime_health), 'aiEngine': 'multi-model-ensemble', 'resultFastPath': True}
         }
         with _draw_cache_lock:
             _draw_cache = dict(payload)
@@ -1664,6 +1732,30 @@ def draw():
             }
             return jsonify(payload)
         return jsonify({'ok': False, 'databaseStatus': 'reconnecting', 'error': '数据库暂时不可用，正在自动重连'}), 503
+
+
+@app.get('/api/result-fast')
+def result_fast():
+    ds,p,ps,platform=current_period()
+    target=period_target_block(ds,p)
+    row=None
+    with _live_blocks_lock:
+        row=_live_blocks.get(int(target))
+    if row is None:
+        try:
+            dbrows=get_db_blocks([target]); row=dbrows.get(target)
+        except Exception:
+            row=None
+    if not row:
+        return jsonify({'ready':False,'period':ps,'platformPeriod':platform,'targetBlock':target})
+    nums=row.get('numbers')
+    if isinstance(nums,str):
+        try: nums=json.loads(nums)
+        except Exception: nums=[]
+    single=int(row.get('singleCount',row.get('single_count',0)))
+    return jsonify({'ready':True,'period':ps,'platformPeriod':platform,'targetBlock':target,
+                    'blockHash':row.get('block',row.get('block_hash')),
+                    'numbers':nums,'single':single,'singleText':f'单{single}'})
 
 
 @app.get('/api/system-health')

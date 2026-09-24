@@ -152,3 +152,13 @@ AI statistical analysis module:
 - 新增 /api/system-health：查看 periodGroups、predictions、events、模型版本和最近后台错误。
 - V6保留V5的17/17强制建档与pending重试机制。
 - 数据库“智能化”用于完整性、恢复、统计和模型验证，不代表区块哈希可被可靠预测。
+
+
+## V7 AI Engine
+- 多模型融合：长期分布、短期分布、当前期1~17组结构、状态转移、遗漏压力共同评分。
+- 所有同期开奖前模型只允许读取当前1~17组和此前已完成正式开奖，避免第20组信息泄漏。
+- AI预测记录新增 confidence、ensemble_detail、model_weights、model_version、locked_at，便于后续真实样本外比较。
+- confidence 是模型分数分离度，不宣称为真实中奖概率。
+- 新增 /api/result-fast 极速正式结果接口：只读取目标第20组，不运行历史统计/AI，避免复杂AI拖慢开奖结果。
+- 保留V6 SmartDB自动物化、自修复、系统事件和V5 17/17强制建档。
+- 本版增强的是建模、验证与显示通道；不保证密码学哈希存在可持续预测优势。
