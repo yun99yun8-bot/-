@@ -497,19 +497,12 @@ th{background:#f5f6f8;font-weight:800}
 <div class="wrap">
 
 <div class="tabs">
-<button id="b1" class="on" onclick="tab(1)">王者归来</button>
+<button id="b1" class="on" onclick="tab(1)">Torn计算</button>
 <button id="b2" onclick="tab(2)">历史统计</button>
 </div>
 
 <section id="s1" class="section show">
 
-<div class="card">
-<div class="box"><div class="label">当前时间</div><div class="big" id="currentTime">-</div></div>
-<div class="box"><div class="label">当天期数（1～1440）</div><div class="big" id="period">-</div></div>
-<div class="box"><div class="label">20组进度</div><div class="big" id="pos">-</div></div>
-<div class="box"><div class="label">开奖区块</div><div class="big" id="block">-</div></div>
-<div class="box"><div class="label">链上当前区块</div><div class="big" id="chain">-</div></div>
-</div>
 </div>
 
 <div class="card center">
@@ -560,7 +553,7 @@ th{background:#f5f6f8;font-weight:800}
 
 <div class="card">
 <b>历史统计独立预判</b>
-<div class="note" style="margin-top:5px">只读取已经完成的历史正式开奖数据，与「王者归来」算法完全独立。</div>
+<div class="note" style="margin-top:5px">只读取已经完成的历史正式开奖数据，与「Torn计算」算法完全独立。</div>
 <div class="grid" style="margin-top:7px">
 <div class="box"><div class="label">预判期</div><div class="big" id="histPredPeriod">-</div></div>
 <div class="box"><div class="label">历史匹配次数</div><div class="big" id="histMatches">0</div></div>
@@ -608,12 +601,7 @@ async function refresh(){
   const d=await (await fetch('/api/state',{cache:'no-store'})).json();
   const l=d.latest||{};
 
-  document.getElementById('currentTime').textContent=d.day||'-';
-  document.getElementById('period').textContent=d.display_period+'期';
-  document.getElementById('pos').textContent=d.progress+'/20';
   document.getElementById('cycleLabel').textContent=d.day+'｜当前期：'+d.display_period+'｜20组进度：'+d.progress+'/20';
-  document.getElementById('block').textContent=l.target_block||l.block||'-';
-  document.getElementById('chain').textContent=l.chain_block||'-';
 
   document.getElementById('pred').textContent=d.prediction ? ('预判期：'+d.display_period+'期｜'+d.prediction) : '等待17/20预判';
   document.getElementById('actual').textContent=d.actual ? ('开奖期：'+d.display_period+'期｜第20组：'+d.actual) : '等待20/20开奖';
