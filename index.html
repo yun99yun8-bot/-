@@ -27,7 +27,8 @@
           <div class="prob-item" data-prob-single="1">单1<small>次数：--次</small><small>概率：--%</small></div>
           <div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
         </div>
-        <div class="conclusion" id="statsConclusion">结论：等待第1～18组数据</div>
+        <div class="conclusion" id="statsConclusion">数据结论：等待第1～18组数据</div>
+        <div class="conclusion" id="aiAnalysisLine">AI分析：正在分析中…</div>
         <div class="ai-panel">
           <div class="ai-result-box" id="aiVerifyResult">预测验证：等待已开奖预测</div>
           <div class="ai-lines">
@@ -132,8 +133,11 @@
     }
     var sample=Number(ds.sampleSize||0), highest=Array.isArray(ds.highest)?ds.highest:[], names=[];
     for(var j=0;j<highest.length;j++)names.push('单'+highest[j].single);
-    text('statsConclusion',highest.length?'结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）':'结论：等待第1～18组数据');
+    text('statsConclusion',highest.length?'数据结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）':'数据结论：等待第1～18组数据');
     var ai=data.aiAnalysis||{}, scoreMap=ai.scores||{}, ranked=[];
+    var aiSingle=(ai.single===0||ai.single)?ai.single:null;
+    var aiSample=Number(ai.historicalSample||0);
+    text('aiAnalysisLine', aiSingle!==null ? ('AI分析：单'+aiSingle+'　｜　历史样本：'+aiSample+'期'+(ai.frozen?'　｜　本期已锁定':'　｜　实时分析')) : 'AI分析：正在分析中…');
     for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
     ranked.sort(function(a,b){return b.score-a.score || a.single-b.single;});
     var topParts=[];
@@ -158,32 +162,27 @@
     var same=Array.isArray(ai.sameAsGroup20)?ai.sameAsGroup20:[];
     text('group20Matches',same.length?'与第20组相同：第'+same.join('、第')+'组':'与第20组相同：'+(data.officialReady?'前19组无相同单数结果':'等待第20组'));
   }
-  var groupSeenKeys={};
-  var groupHighlightUntil={};
-  var groupsInitialized=false;
-  var activeGroupPeriodKey=null;
   function renderGroups(groups, periodKey){
-    var body=document.getElementById('groupTableBody'), map={}; groups=Array.isArray(groups)?groups:[];
-    periodKey=String(periodKey||'');
-    if(activeGroupPeriodKey!==periodKey){ groupSeenKeys={}; groupHighlightUntil={}; groupsInitialized=false; activeGroupPeriodKey=periodKey; }
-    var now=Date.now();
+    var body=document.getElementById('groupTableBody');
+    groups=Array.isArray(groups)?groups:[];
+    var map={};
     for(var i=0;i<groups.length;i++){
-      var gi=groups[i], gn=Number(gi.group), key=periodKey+'|'+gn+'|'+String(gi.blockNumber==null?'':gi.blockNumber);
-      map[gn]=gi;
-      if(groupsInitialized && !groupSeenKeys[key]) groupHighlightUntil[key]=now+5000;
-      groupSeenKeys[key]=true;
+      var g=groups[i], n=Number(g.group);
+      if(n>=1 && n<=20) map[n]=g;
     }
-    groupsInitialized=true;
-    // Keep a fixed 20-row frame. Each exact group lights up only when it first arrives.
+    var count=Object.keys(map).length;
+    // 20组不再逐组动态点亮：本期20组齐全后一次性完整显示。
+    if(count<20){
+      body.innerHTML='<tr><td colspan="4">等待本期20组数据（'+count+'/20）</td></tr>';
+      return;
+    }
     var html='';
     for(var n=1;n<=20;n++){
       var g=map[n];
-      if(!g){ html+='<tr class="waiting-group-row"><td>第'+n+'组</td><td>等待新区块</td><td>--</td><td>--</td></tr>'; continue; }
-      var block=g.blockNumber!=null?g.blockNumber:'--', single=g.singleCount!=null?'单'+g.singleCount:'--';
-      var nums=Array.isArray(g.numbers)&&g.numbers.length?g.numbers.join(' '):'--';
-      var rowKey=periodKey+'|'+n+'|'+String(g.blockNumber==null?'':g.blockNumber);
-      var rowClass=(groupHighlightUntil[rowKey] && groupHighlightUntil[rowKey]>now)?' class="new-group-row"':'';
-      html+='<tr'+rowClass+'><td>第'+n+'组</td><td>'+block+'</td><td>'+single+'</td><td>'+nums+'</td></tr>';
+      var block=g&&g.blockNumber!=null?g.blockNumber:'--';
+      var single=g&&g.singleCount!=null?'单'+g.singleCount:'--';
+      var nums=g&&Array.isArray(g.numbers)&&g.numbers.length?g.numbers.join(' '):'--';
+      html+='<tr><td>第'+n+'组</td><td>'+block+'</td><td>'+single+'</td><td>'+nums+'</td></tr>';
     }
     body.innerHTML=html;
   }
