@@ -175,10 +175,17 @@
     var c17=data.aiConclusion17||null;
     var c17P=c17?String(c17.period||'').padStart(4,'0'):'';
     var c17Exact=!!(c17 && c17P===currentP && Array.isArray(c17.sourceBlocks) && c17.sourceBlocks.length===17);
+    // 17组进度只统计当前期第1~17组，避免用1~18组统计样本或上一期缓存冒充进度。
+    var progress17=0, currentGroups=Array.isArray(data.groups)?data.groups:[];
+    for(var gi=0;gi<currentGroups.length;gi++){
+      var gg=currentGroups[gi]||{}, gn=Number(gg.group||0);
+      var gp=String(gg.period||data.groupPeriodKey||currentP||'').padStart(4,'0');
+      if(gn>=1 && gn<=17 && gp===currentP && (gg.singleCount===0 || gg.singleCount)){ progress17++; }
+    }
     if(c17Exact && (c17.single===0 || c17.single)){
-      text('statsConclusion','AI结论：单'+c17.single+'　｜　第'+c17P+'期1-17组　｜　'+(c17.mode||'综合倾向')+'　｜　已锁定');
+      text('statsConclusion','AI结论：单'+c17.single+'　　17组进度：17/17');
     }else{
-      text('statsConclusion','AI结论：正在收集前17组数据（'+Math.min(sample,17)+'/17）');
+      text('statsConclusion','AI结论：分析中　　17组进度：'+Math.min(progress17,17)+'/17');
     }
     var incomingAI=data.aiAnalysis||{};
     var incomingScores=incomingAI.scores||{};
@@ -201,9 +208,8 @@
     // frozen value replaces it and remains unchanged until the period closes.
     if(showLockedAI){
       text('aiAnalysisLine','AI分析：单'+aiSingle+'　｜　第'+String(aiPeriod).padStart(4,'0')+'期　｜　已锁定');
-    }else if(aiSingle!==null && currentCountdownValue>10){
-      text('aiAnalysisLine','AI分析：单'+aiSingle+'　｜　实时分析中（未锁定）');
     }else{
+      // 60~11秒不泄露实时中间值；10秒触发锁定，锁定响应到达后在10~1秒持续显示。
       text('aiAnalysisLine','AI分析：正在分析中…');
     }
     for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
