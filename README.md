@@ -190,3 +190,19 @@ AI statistical analysis module:
 - system-health 新增 period-engine/supervisor 心跳、workerRestarts、currentPeriodState。
 - 网页只是显示器；AI锁定、开奖、验证、数据库保存均不依赖手机页面请求。
 - V8增强可靠性、故障隔离和可恢复性，不承诺TRON密码学哈希存在可持续预测优势。
+
+# V8.1 Production — Web + Background Worker
+
+本版把 V8 单体运行拆成两个独立进程：
+
+- Web Service: `gunicorn app:app --workers 2 --threads 4 --timeout 45`
+  - 只提供网页/API，不启动 TRON/AI/开奖后台线程。
+- Background Worker: `python worker.py`
+  - 独立启动 TRON采集、DB writer、极速开奖、AI预测、SmartDB、Period Engine、Supervisor。
+- 两个服务使用同一个付费 PostgreSQL `DATABASE_URL`。
+
+重要：部署 V8.1 后 Web 的环境变量 `RUN_EMBEDDED_WORKERS` 必须保持 `0`（或不设置）；不要让 Web 与 Background Worker 同时运行后台引擎。
+
+推荐迁移顺序：先部署代码到 Web（后台线程关闭），随后立即创建 Background Worker 并设置相同的 Internal `DATABASE_URL`。迁移窗口内可能短暂停止后台采集，因此最好连续完成两步。
+
+`render.yaml` 已包含 web/worker 蓝图示例，但已有 Render 服务可直接手工修改 Start Command，不必重建数据库。

@@ -61,7 +61,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v8-autonomous-1'
+MODEL_VERSION = 'v8.1-production-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -2108,7 +2108,9 @@ def history():
         return jsonify({'ok': False, 'error': str(exc)}), 502
 
 
-start_worker_once()
+# V8.1 Production: web process is read/API only. Background engine runs in worker.py.
+if os.environ.get('RUN_EMBEDDED_WORKERS','0') == '1':
+    start_worker_once()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
