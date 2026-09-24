@@ -25,3 +25,9 @@ DB3 realtime architecture:
 - Frontend refresh interval is 1 second.
 - /api/history exposes retained saved rows for later history UI work.
 - Requires Render environment variable DATABASE_URL (Internal Database URL).
+
+DB stability update:
+- Reuses a small thread-safe PostgreSQL connection pool (1-4 connections).
+- Retries transient connection acquisition failures.
+- /api/draw keeps the last successful payload in memory and returns it with databaseStatus=reconnecting instead of blanking the frontend during a short DB timeout.
+- Existing 3-day retention, TRON collector, calculation rules, and 5-second new-group highlight are unchanged.

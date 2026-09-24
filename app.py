@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
+    from psycopg2.pool import ThreadedConnectionPool
 except Exception:
     psycopg2 = None
 
@@ -35,6 +36,10 @@ DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
 DB_RETENTION_DAYS = 3
 _worker_started = False
 _worker_lock = threading.Lock()
+_db_pool = None
+_db_pool_lock = threading.Lock()
+_draw_cache = None
+_draw_cache_lock = threading.Lock()
 
 
 def current_period():
@@ -164,10 +169,63 @@ def period_target_block(date_str, period):
     return 86522304 + (period_index(date_str, int(period)) - anchor_idx) * 20
 
 
-def db_connect():
+def get_db_pool():
+    """Create a small thread-safe PostgreSQL pool lazily.
+
+    A small pool is intentional: the collector is the main writer and the
+    frontend should reuse existing connections instead of opening a new TCP
+    connection on every poll.
+    """
+    global _db_pool
     if not DATABASE_URL or psycopg2 is None:
         return None
-    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
+    if _db_pool is not None:
+        return _db_pool
+    with _db_pool_lock:
+        if _db_pool is None:
+            _db_pool = ThreadedConnectionPool(1, 4, DATABASE_URL, connect_timeout=5)
+    return _db_pool
+
+
+def db_connect(retries=2):
+    """Borrow a pooled connection, retrying transient Render timeouts."""
+    pool = get_db_pool()
+    if pool is None:
+        return None
+    last = None
+    for attempt in range(retries + 1):
+        try:
+            conn = pool.getconn()
+            if conn.closed:
+                pool.putconn(conn, close=True)
+                raise psycopg2.OperationalError('pooled connection was closed')
+            return conn
+        except Exception as exc:
+            last = exc
+            if attempt < retries:
+                time.sleep(1 if attempt == 0 else 3)
+    raise last
+
+
+def db_release(conn, broken=False):
+    if conn is None:
+        return
+    try:
+        if not conn.closed:
+            try:
+                conn.rollback()
+            except Exception:
+                broken = True
+        pool = get_db_pool()
+        if pool is not None:
+            pool.putconn(conn, close=broken)
+        else:
+            conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def init_db():
@@ -190,7 +248,7 @@ def init_db():
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_tron_blocks_fetched_at ON tron_blocks(fetched_at DESC)")
         return True
     finally:
-        conn.close()
+        db_release(conn)
 
 
 def save_block_to_db(block):
@@ -213,7 +271,7 @@ def save_block_to_db(block):
                       single_count=EXCLUDED.single_count
                 """, (int(block['number']), block['block'], block_time, json.dumps([f'{n:02d}' for n in nums]), calc_single_count(nums)))
     finally:
-        conn.close()
+        db_release(conn)
 
 
 def cleanup_old_db_rows():
@@ -225,7 +283,7 @@ def cleanup_old_db_rows():
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM tron_blocks WHERE fetched_at < NOW() - INTERVAL '3 days'")
     finally:
-        conn.close()
+        db_release(conn)
 
 
 def get_db_blocks(numbers):
@@ -240,7 +298,7 @@ def get_db_blocks(numbers):
             cur.execute("SELECT block_number, block_hash, numbers, single_count FROM tron_blocks WHERE block_number = ANY(%s)", (nums,))
             return {int(r['block_number']): r for r in cur.fetchall()}
     finally:
-        conn.close()
+        db_release(conn)
 
 
 def get_db_latest_number():
@@ -253,7 +311,7 @@ def get_db_latest_number():
             row = cur.fetchone()
             return int(row[0]) if row and row[0] is not None else None
     finally:
-        conn.close()
+        db_release(conn)
 
 
 def get_db_recent_rows(limit=2000):
@@ -265,7 +323,7 @@ def get_db_recent_rows(limit=2000):
             cur.execute("SELECT block_number, block_hash, block_time, numbers, single_count, fetched_at FROM tron_blocks ORDER BY block_number DESC LIMIT %s", (int(limit),))
             return cur.fetchall()
     finally:
-        conn.close()
+        db_release(conn)
 
 
 def tron_ingest_worker():
@@ -525,48 +583,76 @@ def style():
 
 @app.get('/api/draw')
 def draw():
-    """Frontend reads database only. TRON fetching is done by the server worker."""
+    """Serve live data from PostgreSQL, with last-good-memory fallback.
+
+    A transient DB timeout must not blank the frontend. The last successful
+    payload stays available while the backend reconnects automatically.
+    """
+    global _draw_cache
     date_str, period, period_str, platform_period = current_period()
     state = read_state() or {}
     try:
-        if DATABASE_URL:
-            groups, target20 = collect_groups_from_db(date_str, period)
-            official = groups.get('20')
-            if official:
-                prior = dict(state)
-                state = {
-                    **prior, 'date': date_str, 'period': period_str,
-                    'platformPeriod': platform_period, 'block': official['block'],
-                    'blockNumber': official['blockNumber'], 'numbers': official['numbers'],
-                    'singleCount': official['singleCount'], 'groups': groups,
-                    'groupPeriodKey': f'{date_str}:{period_str}', 'source': 'PostgreSQL / backend collector'
-                }
-                state['omission'] = update_omission(state, official)
-                write_state(state)
-            result_obj = official
-            if result_obj is None and isinstance(state.get('numbers'), list) and len(state.get('numbers')) == 7:
-                result_obj = {'numbers': state['numbers'], 'singleCount': state.get('singleCount'), 'blockNumber': state.get('blockNumber'), 'block': state.get('block'), 'platformPeriod': state.get('platformPeriod')}
-            omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
-            omission = {str(i): int(omission.get(str(i), 0) or 0) for i in range(8)}
-            history = build_recent_official_history(date_str, period, 20)
-            return jsonify({
-                **state, 'platformPeriod': platform_period, 'currentPeriod': period_str,
-                'targetResultBlock': target20, 'officialReady': bool(official),
-                'resultNumbers': result_obj.get('numbers', []) if result_obj else [],
-                'resultSingleCount': result_obj.get('singleCount') if result_obj else None,
-                'resultBlockNumber': result_obj.get('blockNumber') if result_obj else None,
-                'resultPlatformPeriod': result_obj.get('platformPeriod') if result_obj and result_obj.get('platformPeriod') else state.get('platformPeriod'),
-                'result': result_obj, 'omission': omission, 'resultHistory': history,
-                'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
-                'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
-                'storage': {'database': True, 'retentionDays': DB_RETENTION_DAYS, 'frontendSource': 'PostgreSQL'},
-                'debug': {'databaseLatestBlock': get_db_latest_number(), 'targetBlock': target20}
-            })
-        # Safe fallback for local runs without DATABASE_URL.
-        return jsonify({'ok': False, 'error': 'DATABASE_URL 未配置'}), 503
+        if not DATABASE_URL:
+            raise RuntimeError('DATABASE_URL 未配置')
+        groups, target20 = collect_groups_from_db(date_str, period)
+        official = groups.get('20')
+        if official:
+            prior = dict(state)
+            state = {
+                **prior, 'date': date_str, 'period': period_str,
+                'platformPeriod': platform_period, 'block': official['block'],
+                'blockNumber': official['blockNumber'], 'numbers': official['numbers'],
+                'singleCount': official['singleCount'], 'groups': groups,
+                'groupPeriodKey': f'{date_str}:{period_str}', 'source': 'PostgreSQL / backend collector'
+            }
+            state['omission'] = update_omission(state, official)
+            write_state(state)
+        result_obj = official
+        if result_obj is None and isinstance(state.get('numbers'), list) and len(state.get('numbers')) == 7:
+            result_obj = {'numbers': state['numbers'], 'singleCount': state.get('singleCount'), 'blockNumber': state.get('blockNumber'), 'block': state.get('block'), 'platformPeriod': state.get('platformPeriod')}
+        omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
+        omission = {str(i): int(omission.get(str(i), 0) or 0) for i in range(8)}
+        history = build_recent_official_history(date_str, period, 20)
+        payload = {
+            **state, 'platformPeriod': platform_period, 'currentPeriod': period_str,
+            'targetResultBlock': target20, 'officialReady': bool(official),
+            'resultNumbers': result_obj.get('numbers', []) if result_obj else [],
+            'resultSingleCount': result_obj.get('singleCount') if result_obj else None,
+            'resultBlockNumber': result_obj.get('blockNumber') if result_obj else None,
+            'resultPlatformPeriod': result_obj.get('platformPeriod') if result_obj and result_obj.get('platformPeriod') else state.get('platformPeriod'),
+            'result': result_obj, 'omission': omission, 'resultHistory': history,
+            'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
+            'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
+            'databaseStatus': 'connected', 'stale': False,
+            'storage': {'database': True, 'retentionDays': DB_RETENTION_DAYS, 'frontendSource': 'PostgreSQL + memory fallback'},
+            'debug': {'databaseLatestBlock': get_db_latest_number(), 'targetBlock': target20}
+        }
+        with _draw_cache_lock:
+            _draw_cache = dict(payload)
+        return jsonify(payload)
     except Exception as exc:
-        return jsonify({'ok': False, 'error': str(exc)}), 502
-
+        with _draw_cache_lock:
+            cached = dict(_draw_cache) if isinstance(_draw_cache, dict) else None
+        if cached:
+            cached.update({
+                'ok': True, 'databaseStatus': 'reconnecting', 'stale': True,
+                'databaseError': type(exc).__name__,
+                'currentPeriod': period_str, 'platformPeriod': platform_period
+            })
+            return jsonify(cached)
+        # First boot with no in-memory payload: fall back to the last persisted
+        # state file rather than returning a 502 page to the browser.
+        if state:
+            groups_obj = state.get('groups') if isinstance(state.get('groups'), dict) else {}
+            payload = {
+                **state, 'ok': True, 'databaseStatus': 'reconnecting', 'stale': True,
+                'databaseError': type(exc).__name__, 'currentPeriod': period_str,
+                'platformPeriod': platform_period,
+                'groups': sorted(groups_obj.values(), key=lambda x: x.get('group', 0)),
+                'dataStats': stats_from_groups(groups_obj)
+            }
+            return jsonify(payload)
+        return jsonify({'ok': False, 'databaseStatus': 'reconnecting', 'error': '数据库暂时不可用，正在自动重连'}), 503
 
 
 @app.get('/api/db-check')
