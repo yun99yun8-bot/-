@@ -21,13 +21,13 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .period-badge strong{font-size:16px}
 .result-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
 .result-box{height:54px;border-radius:50%;background:#eef1f5;color:#24324b;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:800;border:1px solid #dce2ea}
-.content>.card:nth-child(2){border-color:#8b4de8}
-.content>.card:nth-child(2) .section-title{color:#5d25a8}
-.omission-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
-.stat{border-radius:9px;padding:12px 6px;text-align:center;font-weight:800;font-size:15px;color:#24324b;border:1px solid rgba(80,100,130,.08)}
-.stat small{display:block;margin-top:5px;font-size:12px;color:#718096;font-weight:500}
+.content>.card:nth-child(2){border-color:#8b4de8;padding:10px 12px;margin-bottom:10px}
+.content>.card:nth-child(2) .section-title{color:#5d25a8;margin-bottom:8px;font-size:16px}
+.omission-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:5px}
+.stat{border-radius:7px;padding:8px 2px;text-align:center;font-weight:800;font-size:13px;line-height:1.15;color:#24324b;border:1px solid rgba(80,100,130,.08);min-width:0}
+.stat small{display:block;margin-top:3px;font-size:10px;color:#718096;font-weight:500}
 .stat:nth-child(1){background:#ffe4e6;color:#c62828}.stat:nth-child(2){background:#fff0d8;color:#d68100}.stat:nth-child(3){background:#def7d8;color:#2e8b38}.stat:nth-child(4){background:#d8f5ed;color:#177c6a}.stat:nth-child(5){background:#dceeff;color:#2267b1}.stat:nth-child(6){background:#e1e7ff;color:#304db2}.stat:nth-child(7){background:#eee2ff;color:#7040ad}.stat:nth-child(8){background:#f6def8;color:#9b3aa0}
 .content>.card:nth-child(3){border-color:#2196f3}
 .content>.card:nth-child(3) .section-title{color:#1b67aa}
 .table-placeholder{min-height:180px;background:#f8fbff}
-@media(max-width:360px){.content{padding:2px 8px 12px}.topbar,.page-tabs{margin-left:8px;margin-right:8px}.card{padding:12px}.omission-grid{gap:6px}.stat{font-size:14px}.result-grid{gap:5px}.result-box{height:43px;font-size:15px}.period-badge{font-size:12px;padding:6px 8px}}
+@media(max-width:360px){.content{padding:2px 8px 12px}.topbar,.page-tabs{margin-left:8px;margin-right:8px}.card{padding:12px}.omission-grid{gap:4px}.stat{font-size:12px;padding:7px 1px}.stat small{font-size:9px;margin-top:2px}.result-grid{gap:5px}.result-box{height:43px;font-size:15px}.period-badge{font-size:12px;padding:6px 8px}}
