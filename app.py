@@ -47,6 +47,8 @@ _db_write_queue = queue.Queue(maxsize=1000)
 _live_latest_number = None
 _relation_cache = {'key': None, 'at': 0, 'value': None}
 _relation_cache_lock = threading.Lock()
+_fast_diag = {'target': None, 'provider': None, 'firstSeenAt': None, 'latencyMs': None, 'errors': {}}
+_fast_diag_lock = threading.Lock()
 
 
 def current_period():
@@ -127,6 +129,88 @@ def fetch_block_by_number(number):
     except Exception as e:
         errors.append('TRONScan: ' + str(e))
     raise RuntimeError(f'目标区块 {number} 尚未可读取；' + ' | '.join(errors))
+
+def fetch_block_fast(number):
+    """Race non-solidity providers for the target block; first valid block wins."""
+    number = int(number)
+    started = time.perf_counter()
+    errors = {}
+
+    def via_trongrid():
+        data = _get_json(TRON_BLOCK_BY_NUM, method='POST', payload={'num': number})
+        block_id = data.get('blockID')
+        if not block_id:
+            raise RuntimeError('block not found')
+        return 'TRONGrid-FullNode', {
+            'block': block_id,
+            'number': int(data.get('block_header', {}).get('raw_data', {}).get('number', number)),
+            'timestamp': data.get('block_header', {}).get('raw_data', {}).get('timestamp')
+        }
+
+    def via_tronscan():
+        data = _get_json(f'{TRONSCAN_BLOCK}?number={number}')
+        rows = data.get('data') if isinstance(data, dict) else None
+        row = rows[0] if isinstance(rows, list) and rows else None
+        if not row or not row.get('hash'):
+            raise RuntimeError('block not found')
+        return 'TRONScan', {'block': row['hash'], 'number': int(row.get('number', number)), 'timestamp': row.get('timestamp')}
+
+    pool = ThreadPoolExecutor(max_workers=2)
+    futures = [pool.submit(via_trongrid), pool.submit(via_tronscan)]
+    try:
+        for future in as_completed(futures, timeout=3.2):
+            try:
+                provider, block = future.result()
+                if int(block.get('number', -1)) == number and block.get('block'):
+                    elapsed = round((time.perf_counter() - started) * 1000, 1)
+                    for f in futures:
+                        if f is not future:
+                            f.cancel()
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    return block, provider, elapsed, errors
+            except Exception as exc:
+                errors[str(len(errors)+1)] = str(exc)
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    raise RuntimeError('target block not yet available: ' + ' | '.join(errors.values()))
+
+
+def target_result_fast_worker():
+    """Directly watch the known group-20 block, bypassing latest-block and DB paths."""
+    last_target = None
+    while True:
+        sleep_for = 0.20
+        try:
+            date_str, period, _, _ = current_period()
+            target = period_target_block(date_str, period)
+            with _live_blocks_lock:
+                ready = target in _live_blocks
+            if target != last_target:
+                last_target = target
+                with _fast_diag_lock:
+                    _fast_diag.update({'target': target, 'provider': None, 'firstSeenAt': None, 'latencyMs': None, 'errors': {}})
+            if not ready:
+                try:
+                    block, provider, latency_ms, errors = fetch_block_fast(target)
+                    publish_block_live(block)
+                    enqueue_block_for_db(block)
+                    with _fast_diag_lock:
+                        _fast_diag.update({
+                            'target': target, 'provider': provider,
+                            'firstSeenAt': datetime.now(CN_TZ).isoformat(timespec='milliseconds'),
+                            'latencyMs': latency_ms, 'errors': errors
+                        })
+                except Exception as exc:
+                    with _fast_diag_lock:
+                        _fast_diag['errors'] = {'last': str(exc)[:300]}
+            else:
+                sleep_for = 0.35
+        except Exception as exc:
+            with _fast_diag_lock:
+                _fast_diag['errors'] = {'worker': str(exc)[:300]}
+            sleep_for = 0.5
+        time.sleep(sleep_for)
+
 
 def calc_numbers(block_hash):
     """Platform rule: read the hash from right to left.
@@ -453,6 +537,7 @@ def start_worker_once():
         _worker_started = True
         threading.Thread(target=db_writer_worker, name='db-writer', daemon=True).start()
         threading.Thread(target=tron_ingest_worker, name='tron-ingest', daemon=True).start()
+        threading.Thread(target=target_result_fast_worker, name='target-result-fast', daemon=True).start()
 
 
 def collect_period_groups(date_str, period, latest_number, state):
@@ -958,7 +1043,7 @@ def draw():
             'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
             'databaseStatus': 'connected', 'stale': False,
             'storage': {'database': True, 'retentionDays': DB_RETENTION_DAYS, 'frontendSource': 'PostgreSQL + memory fallback'},
-            'debug': {'databaseLatestBlock': get_db_latest_number(), 'targetBlock': target20}
+            'debug': {'databaseLatestBlock': get_db_latest_number(), 'targetBlock': target20, 'fastTarget': dict(_fast_diag)}
         }
         with _draw_cache_lock:
             _draw_cache = dict(payload)

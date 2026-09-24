@@ -45,3 +45,11 @@ AI statistical analysis module:
 - “AI评分前三”改为“本期AI预测前三”：当前1-19组实时数据 + 历史正式结果 + 固定组次对第20组的历史关联共同评分。
 - 增加“历史高关联组次”前三，显示固定组次与第20组单几一致的历史匹配率。
 - 1200->1201 的 +18 区块偏移继续保留。
+
+
+## Fast target-block path
+- Group 20 is watched directly by its known target block number.
+- TRONGrid FullNode and TRONScan are queried concurrently; the first valid matching block is published to RAM immediately.
+- PostgreSQL persistence remains asynchronous and cannot delay the displayed result.
+- Frontend live polling is 200 ms.
+- `/api/draw` debug.fastTarget reports the winning provider and request latency for diagnosis.
