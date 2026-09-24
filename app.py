@@ -18,10 +18,16 @@ STATE_FILE = BASE_DIR / 'draw_state.json'
 
 def current_period():
     now = datetime.now(CN_TZ)
-    period = now.hour * 60 + now.minute + 1
-    date_str = now.strftime('%Y-%m-%d')
+    # Platform minute numbering: 08:01 is period 0481.
+    # At 00:00, the previous day's 1440th period is still displayed;
+    # 00:01 starts the new day at 0001.
+    period = 1440 if (now.hour == 0 and now.minute == 0) else (now.hour * 60 + now.minute)
+    date_for_period = now.date()
+    if now.hour == 0 and now.minute == 0:
+        # Keep the calendar date shown by the platform for the closing minute.
+        date_for_period = now.date()
+    date_str = date_for_period.strftime('%Y-%m-%d')
     period_str = f'{period:04d}'
-    # Platform display uses date + 4-digit minute period, e.g. 2609240486.
     platform_period = now.strftime('%y%m%d') + period_str
     return date_str, period, period_str, platform_period
 
@@ -103,16 +109,17 @@ def write_state(data):
 
 
 def target_block_number(date_str, period, state, latest_number):
-    """Locate the platform's result block.
+    """Map platform periods to the corresponding TRON result block.
 
-    Confirmed platform behavior from the supplied records: successive periods
-    normally advance by exactly 20 TRON blocks. We therefore continue from the
-    last confirmed period by +20, rather than using the arbitrary latest block.
-    For a fresh install on 2026-09-24, the supplied record 0481 -> 86511906 is
-    used as the calibration anchor; later periods advance by +20. If no anchor
-    is available, use the current chain height as a conservative fallback,
-    aligned to the current 20-block cycle.
+    Confirmed anchor supplied by the user:
+      2609240481 -> 86511906
+      2609240482 -> 86511926
+    Every following platform period advances exactly 20 TRON blocks.
+    The same cadence is used across a day boundary; only the platform
+    period number resets to 0001.
     """
+    # If we already have a confirmed prior period, continue from that exact
+    # block. This also handles the 1440 -> next-day 0001 transition.
     if state and state.get('date') and state.get('period') and state.get('blockNumber') is not None:
         try:
             elapsed = period_index(date_str, int(period)) - period_index(state['date'], int(state['period']))
@@ -121,14 +128,13 @@ def target_block_number(date_str, period, state, latest_number):
         except Exception:
             pass
 
-    # Current-day calibration supplied by the user: 2609240481 -> 86511906.
+    # Current-day calibration: 0481 is exactly block 86511906.
     if date_str == '2026-09-24':
-        anchor_period = 481
-        anchor_block = 86511906
-        return anchor_block + (int(period) - anchor_period) * 20
+        return 86511906 + (int(period) - 481) * 20
 
-    # Fallback for a fresh install on another day: keep the same 20-block cadence.
-    # The exact phase can be recalibrated once the first confirmed period is stored.
+    # Fresh install on another date: align the chain height to the same
+    # 20-block cadence. Once a real period is confirmed, state becomes the
+    # authoritative anchor for subsequent periods.
     return int(latest_number) - ((int(latest_number) - 6) % 20)
 
 
