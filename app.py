@@ -40,6 +40,8 @@ _db_pool = None
 _db_pool_lock = threading.Lock()
 _draw_cache = None
 _draw_cache_lock = threading.Lock()
+_live_blocks = {}
+_live_blocks_lock = threading.Lock()
 
 
 def current_period():
@@ -253,6 +255,22 @@ def init_db():
 
 def save_block_to_db(block):
     nums = calc_numbers(block['block'])
+    formatted = [f'{n:02d}' for n in nums]
+    single_count = calc_single_count(nums)
+    bn = int(block['number'])
+
+    # Publish to live memory FIRST. The 20-group panel therefore advances as
+    # soon as a TRON block is calculated; it does not wait for PostgreSQL.
+    with _live_blocks_lock:
+        _live_blocks[bn] = {
+            'block_number': bn, 'block_hash': block['block'],
+            'numbers': formatted, 'single_count': single_count
+        }
+        # Only a small rolling window is needed for the live panel.
+        if len(_live_blocks) > 240:
+            for old_bn in sorted(_live_blocks)[:-160]:
+                _live_blocks.pop(old_bn, None)
+
     ts = block.get('timestamp')
     block_time = datetime.fromtimestamp(ts / 1000, timezone.utc) if ts else None
     conn = db_connect()
@@ -269,7 +287,7 @@ def save_block_to_db(block):
                       block_time=EXCLUDED.block_time,
                       numbers=EXCLUDED.numbers,
                       single_count=EXCLUDED.single_count
-                """, (int(block['number']), block['block'], block_time, json.dumps([f'{n:02d}' for n in nums]), calc_single_count(nums)))
+                """, (bn, block['block'], block_time, json.dumps(formatted), single_count))
     finally:
         db_release(conn)
 
@@ -430,10 +448,22 @@ def collect_period_groups(date_str, period, latest_number, state):
 
     return groups, target20
 
-def collect_groups_from_db(date_str, period):
+def collect_groups_live(date_str, period):
+    """Build the current 20-group frame from live memory + PostgreSQL.
+
+    Memory wins for newly calculated blocks, so each new group can appear on
+    the next frontend poll even if the database is briefly slow. PostgreSQL
+    fills older/current rows after restarts.
+    """
     target20 = period_target_block(date_str, period)
     wanted = [target20 - (20 - g) for g in range(1, 21)]
-    rows = get_db_blocks(wanted)
+    try:
+        rows = get_db_blocks(wanted)
+    except Exception:
+        rows = {}
+    with _live_blocks_lock:
+        live = {bn: dict(_live_blocks[bn]) for bn in wanted if bn in _live_blocks}
+    rows.update(live)
     groups = {}
     for g, bn in enumerate(wanted, start=1):
         row = rows.get(bn)
@@ -594,7 +624,7 @@ def draw():
     try:
         if not DATABASE_URL:
             raise RuntimeError('DATABASE_URL 未配置')
-        groups, target20 = collect_groups_from_db(date_str, period)
+        groups, target20 = collect_groups_live(date_str, period)
         official = groups.get('20')
         if official:
             prior = dict(state)

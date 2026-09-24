@@ -175,7 +175,7 @@
     xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}};
     xhr.send(null);
   }
-  loadDraw(); window.setInterval(loadDraw,2000);
+  loadDraw(); window.setInterval(loadDraw,1000);
 })();
 </script>
 </body>
