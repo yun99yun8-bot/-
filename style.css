@@ -108,3 +108,17 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .omission-card{margin-bottom:18px}
 #historyContent .history-section{margin-bottom:14px}
 #historyContent .group-table-wrap{max-height:620px;overflow:auto}
+
+/* History page stability + mobile display repair */
+#historyContent{padding-bottom:28px}
+#historyContent .card{overflow:hidden}
+.history-status{padding:12px;border-radius:9px;background:#f4f8ff;color:#45658d;font-size:12px;line-height:1.6;text-align:center}
+.history-table-box{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;border:1px solid #e1e8f2;border-radius:9px;background:#fff}
+.history-table-box .group-table{margin:0;min-width:560px}
+.history-table-box .history-table{min-width:680px}
+.history-empty{padding:24px 12px;text-align:center;color:#98a2b3;font-size:12px}
+#historyContent .section-title{position:sticky;left:0}
+#historyContent .group-table th{position:sticky;top:0;z-index:1}
+#historyContent .group-table td{max-width:240px;overflow:hidden;text-overflow:ellipsis}
+#historyContent #patternInsights .group-table{min-width:720px}
+@media(max-width:420px){#historyContent .card{padding:11px 9px}#historyContent .section-title{font-size:15px}.history-table-box .group-table{font-size:10px}.history-status{font-size:11px;padding:10px 7px}}

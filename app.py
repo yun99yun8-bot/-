@@ -1473,7 +1473,7 @@ def history_summary():
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""SELECT p.period_date,p.period_no,p.target_block,p.data_conclusion,p.ai_analysis,
-                          p.prediction_top3,p.actual_single,p.created_at,p.verified_at,b.numbers,b.single_count
+                          p.prediction_top3,p.actual_single,p.created_at,p.verified_at,p.conclusion17,p.conclusion17_mode,b.numbers,b.single_count
                           FROM ai_predictions p LEFT JOIN tron_blocks b ON b.block_number=p.target_block
                           ORDER BY p.period_date DESC,p.period_no DESC LIMIT 100""")
             rows=cur.fetchall()
@@ -1491,7 +1491,7 @@ def history_summary():
             hit=bool(actual is not None and int(actual) in [int(x) for x in top])
             out.append({'date':r['period_date'].isoformat() if r.get('period_date') else None,
                         'period':int(r['period_no']),'targetBlock':int(r['target_block']),
-                        'dataConclusion':r.get('data_conclusion'),'aiAnalysis':r.get('ai_analysis'),
+                        'dataConclusion':r.get('data_conclusion'),'aiAnalysis':r.get('ai_analysis'),'conclusion17':r.get('conclusion17'),'conclusion17Mode':r.get('conclusion17_mode'),
                         'top3':[int(x) for x in top][:3],'actualSingle':int(actual) if actual is not None else None,
                         'numbers':nums,'hit':hit,'verified':actual is not None})
         date_str, period, _, _ = current_period()

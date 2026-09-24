@@ -68,10 +68,10 @@
         <div class="history20-note">固定显示第1～20组；未取得的组显示等待数据。</div>
         <div class="group-table-wrap"><table class="group-table"><thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead><tbody id="groupTableBody"><tr><td colspan="4">等待数据</td></tr></tbody></table></div>
       </section>
-      <section class="card history-section"><div class="section-title">三、历史AI验证</div><div class="placeholder" id="historyModel">正在读取历史模型数据…</div></section>
-      <section class="card history-section"><div class="section-title">四、历史开奖记录</div><div class="placeholder table-placeholder" id="historyDraws">正在读取历史开奖记录…</div></section>
-      <section class="card history-section"><div class="section-title">五、历史预判记录</div><div class="placeholder table-placeholder" id="historyPredictions">正在读取历史预判记录…</div></section>
-      <section class="card history-section"><div class="section-title">六、AI规律库（滚动1000期）</div><div class="placeholder table-placeholder" id="patternInsights">正在读取遗漏卡期、长期分布和哈希结构…</div></section>
+      <section class="card history-section"><div class="section-title">三、历史AI验证</div><div class="history-status" id="historyModel">正在读取历史模型数据…</div></section>
+      <section class="card history-section"><div class="section-title">四、历史开奖记录</div><div class="history-table-box" id="historyDraws"><div class="history-empty">正在读取历史开奖记录…</div></div></section>
+      <section class="card history-section"><div class="section-title">五、历史预判记录</div><div class="history-table-box" id="historyPredictions"><div class="history-empty">正在读取历史预判记录…</div></div></section>
+      <section class="card history-section"><div class="section-title">六、AI规律库（滚动1000期）</div><div class="history-table-box" id="patternInsights"><div class="history-empty">正在读取遗漏卡期、长期分布和哈希结构…</div></div></section>
     </main>
   </div>
 <script>
@@ -86,25 +86,27 @@
   }
   tornTab.onclick=function(){selectTab(true);};
   historyTab.onclick=function(){selectTab(false);loadHistoryPage();};
+  setInterval(function(){if(historyContent && !historyContent.hidden)loadHistoryPage();},10000);
 
   function text(id,value){var el=document.getElementById(id);if(el)el.textContent=(value===null||value===undefined||value==='')?'--':String(value);}
   var historyBusy=false;
   function loadHistoryPage(){
     if(historyBusy)return; historyBusy=true;
     var x=new XMLHttpRequest(); x.open('GET','/api/history-summary?t='+Date.now(),true);
-    x.onreadystatechange=function(){if(x.readyState!==4)return;historyBusy=false;if(x.status<200||x.status>=300)return;try{var d=JSON.parse(x.responseText);if(!d.ok)return;renderHistoryPage(d.rows||[],d.patterns||null);}catch(e){}};
-    x.onerror=function(){historyBusy=false;}; x.send(null);
+    x.timeout=10000;
+    x.onreadystatechange=function(){if(x.readyState!==4)return;historyBusy=false;if(x.status<200||x.status>=300){text('historyModel','历史数据暂时不可用，保留当前页面数据并自动重试');return;}try{var d=JSON.parse(x.responseText);if(!d.ok){text('historyModel','历史数据暂时不可用，稍后自动重试');return;}renderHistoryPage(d.rows||[],d.patterns||null);}catch(e){text('historyModel','历史数据解析失败，稍后自动重试');}};
+    x.onerror=function(){historyBusy=false;text('historyModel','历史数据连接暂时中断，稍后自动重试');}; x.ontimeout=x.onerror; x.send(null);
   }
   function renderHistoryPage(rows,patterns){
     var verified=rows.filter(function(r){return r.verified;}); var hits=verified.filter(function(r){return r.hit;}).length;
     text('historyModel','历史AI前三验证：'+hits+'/'+verified.length+(verified.length?'（'+(hits/verified.length*100).toFixed(2)+'%）':'')+'；仅统计开奖前已保存的预测。');
-    var dh='<table class="group-table"><thead><tr><th>期号</th><th>正式单数</th><th>7个号码</th><th>区块</th></tr></thead><tbody>';
-    var ph='<table class="group-table"><thead><tr><th>期号</th><th>AI前三</th><th>实际</th><th>验证</th></tr></thead><tbody>';
+    var dh='<table class="group-table history-table"><thead><tr><th>期号</th><th>正式单数</th><th>7个号码</th><th>区块</th></tr></thead><tbody>';
+    var ph='<table class="group-table history-table"><thead><tr><th>期号</th><th>17组结论</th><th>10秒AI</th><th>AI前三</th><th>实际</th><th>验证</th></tr></thead><tbody>';
     for(var i=0;i<rows.length;i++){var r=rows[i],p=String(r.period).padStart(4,'0');
       if(r.verified)dh+='<tr><td>'+p+'</td><td>单'+r.actualSingle+'</td><td>'+((r.numbers||[]).join(' ')||'--')+'</td><td>'+r.targetBlock+'</td></tr>';
-      ph+='<tr><td>'+p+'</td><td>'+((r.top3||[]).map(function(v){return '单'+v;}).join(' / ')||'--')+'</td><td>'+(r.actualSingle!=null?'单'+r.actualSingle:'待开奖')+'</td><td>'+(r.verified?(r.hit?'✓ 对':'✕ 错'):'待验证')+'</td></tr>';
+      ph+='<tr><td>'+p+'</td><td>'+(r.conclusion17!=null?('单'+r.conclusion17+(r.conclusion17Mode?' · '+r.conclusion17Mode:'')):'--')+'</td><td>'+(r.aiAnalysis!=null?'单'+r.aiAnalysis:'--')+'</td><td>'+((r.top3||[]).map(function(v){return '单'+v;}).join(' / ')||'--')+'</td><td>'+(r.actualSingle!=null?'单'+r.actualSingle:'待开奖')+'</td><td>'+(r.verified?(r.hit?'✓ 对':'✕ 错'):'待验证')+'</td></tr>';
     }
-    dh+='</tbody></table>'; ph+='</tbody></table>';
+    if(!rows.length){dh+='<tr><td colspan="4">暂无历史开奖记录</td></tr>';ph+='<tr><td colspan="6">暂无历史AI记录</td></tr>';} dh+='</tbody></table>'; ph+='</tbody></table>';
     document.getElementById('historyDraws').innerHTML=dh; document.getElementById('historyPredictions').innerHTML=ph;
     var pe=document.getElementById('patternInsights');
     if(pe && patterns){
