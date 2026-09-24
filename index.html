@@ -13,7 +13,7 @@
       <button id="historyTab">历史数据</button>
     </nav>
 
-    <main class="content">
+    <main class="content" id="tornContent">
       <section class="card stats-card">
         <div class="section-title">数据统计</div>
         <div class="prob-grid">
@@ -64,13 +64,34 @@
         <div class="placeholder table-placeholder">等待数据</div>
       </section>
     </main>
+    <main class="content" id="historyContent" hidden>
+      <section class="card history-section">
+        <div class="section-title">一、模仿预测</div>
+        <div class="placeholder">内容占位</div>
+      </section>
+
+      <section class="card history-section">
+        <div class="section-title">二、历史开奖记录</div>
+        <div class="placeholder table-placeholder">内容占位</div>
+      </section>
+
+      <section class="card history-section">
+        <div class="section-title">三、历史预判记录</div>
+        <div class="placeholder table-placeholder">内容占位</div>
+      </section>
+    </main>
   </div>
 <script>
   const tornTab=document.getElementById('tornTab');
   const historyTab=document.getElementById('historyTab');
+  const tornContent=document.getElementById('tornContent');
+  const historyContent=document.getElementById('historyContent');
   function selectTab(active){
-    tornTab.classList.toggle('active', active===tornTab);
-    historyTab.classList.toggle('active', active===historyTab);
+    const isTorn=active===tornTab;
+    tornTab.classList.toggle('active', isTorn);
+    historyTab.classList.toggle('active', !isTorn);
+    tornContent.hidden=!isTorn;
+    historyContent.hidden=isTorn;
   }
   tornTab.addEventListener('click',()=>selectTab(tornTab));
   historyTab.addEventListener('click',()=>selectTab(historyTab));

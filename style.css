@@ -40,3 +40,6 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .conclusion{margin-top:8px;border-radius:8px;background:#fff0f5;color:#8f214d;text-align:center;padding:7px 6px;font-size:13px;font-weight:700}
 .conclusion strong{font-size:15px}
 @media(max-width:360px){.prob-grid{gap:4px}.prob-item{font-size:12px;padding:6px 1px;min-height:52px}.prob-item small{font-size:9px}.conclusion{font-size:12px;padding:6px}}
+
+[hidden] { display: none !important; }
+.history-section .placeholder { min-height: 72px; display:flex; align-items:center; justify-content:center; }
