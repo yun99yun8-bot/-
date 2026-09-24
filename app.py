@@ -59,6 +59,11 @@ _ai_summary_cache = {'key': None, 'at': 0, 'value': None}
 _ai_summary_cache_lock = threading.Lock()
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
+_deep_ai_cache = {}
+_deep_ai_lock = threading.Lock()
+_deep_ai_executor = ThreadPoolExecutor(max_workers=1)
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '').strip()
+OPENAI_MODEL = os.environ.get('OPENAI_MODEL', 'gpt-5.6-luna').strip() or 'gpt-5.6-luna'
 
 
 def current_period():
@@ -922,6 +927,73 @@ def pattern_insights(date_str, period, limit=1000):
             'hashDiagnostics':{'sampleHashes':len(hashes),'aeCounts':ae,'digitCounts':digits},
             'note':'遗漏条件率为历史统计并经过平滑；哈希字符统计只用于检测偏差，不代表存在可追踪公式。'}
 
+def _deep_ai_extract_text(obj):
+    if isinstance(obj, dict):
+        if isinstance(obj.get('output_text'), str):
+            return obj['output_text']
+        parts=[]
+        for out in obj.get('output') or []:
+            if not isinstance(out, dict): continue
+            for c in out.get('content') or []:
+                if isinstance(c,dict) and isinstance(c.get('text'),str): parts.append(c['text'])
+        return ''.join(parts)
+    return ''
+
+def _deep_ai_json(text):
+    text=(text or '').strip()
+    if text.startswith('```'):
+        text=text.strip('`').strip()
+        if text.lower().startswith('json'): text=text[4:].strip()
+    a=text.find('{'); b=text.rfind('}')
+    if a<0 or b<a: return None
+    try: return json.loads(text[a:b+1])
+    except Exception: return None
+
+def build_deep_ai_features(date_str, period, groups, historical, relation, local_scores, c17):
+    vals={str(i):int(groups[str(i)]['singleCount']) for i in range(1,18) if str(i) in groups and groups[str(i)].get('singleCount') is not None}
+    hz=omission_hazard_model(historical); rel=[]
+    for x in (relation.get('ranking') or [])[:3]:
+        g=int(x.get('group') or 0); row=groups.get(str(g))
+        rel.append({'group':g,'currentSingle':int(row['singleCount']) if row and row.get('singleCount') is not None else None,'matchRate':round(float(x.get('matchRate') or 0),2)})
+    def d(n):
+        h=historical[:n]; return [h.count(i) for i in range(8)]
+    return {'period':int(period),'groups1to17':vals,'localScores':local_scores,'localTop3':sorted(range(8),key=lambda i:-float(local_scores.get(str(i),0)))[:3],
+            'conclusion17':c17,'historySamples':len(historical),'history30':d(30),'history100':d(100),'history500':d(500),'history1000':d(1000),
+            'omission':{str(i):int(hz.get(i,{}).get('currentOmission',0)) for i in range(8)},
+            'omissionLift':{str(i):round(float(hz.get(i,{}).get('lift',1)),3) for i in range(8)},'relationTop3':rel}
+
+def run_deep_ai(period_key, features):
+    if not OPENAI_API_KEY: return
+    prompt='你是统计复核层。只能依据提供的历史特征分析单0到单7的相对倾向，不得声称能预测区块哈希或保证命中。重点检查本地模型是否被短期噪声、遗漏追涨或单3/单4天然高频误导。只返回JSON，字段为top3（三个0到7且不重复的整数）、confidence（低/中/高）、reason（不超过70个中文字）、warnings（最多两个短句）。'
+    body={'model':OPENAI_MODEL,'input':prompt+'\n数据：'+json.dumps(features,ensure_ascii=False,separators=(',',':')),'max_output_tokens':260}
+    req=Request('https://api.openai.com/v1/responses',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+OPENAI_API_KEY,'Content-Type':'application/json'},method='POST')
+    try:
+        with urlopen(req,timeout=12) as r: obj=json.loads(r.read().decode())
+        data=_deep_ai_json(_deep_ai_extract_text(obj)) or {}; top=[]
+        for x in data.get('top3') or []:
+            try: x=int(x)
+            except Exception: continue
+            if 0<=x<=7 and x not in top: top.append(x)
+        if len(top)!=3: raise ValueError('invalid top3')
+        result={'enabled':True,'ready':True,'model':OPENAI_MODEL,'top3':top,'single':top[0],'confidence':str(data.get('confidence') or '低')[:2],
+                'reason':str(data.get('reason') or '统计复核完成')[:120],'warnings':[str(x)[:60] for x in (data.get('warnings') or [])[:2]],'period':features['period']}
+    except Exception as e:
+        result={'enabled':True,'ready':False,'model':OPENAI_MODEL,'error':type(e).__name__,'status':'复核失败，本地AI继续运行','period':features['period']}
+    with _deep_ai_lock: _deep_ai_cache[period_key]=result
+
+def deep_ai_summary(date_str, period, groups, historical, relation, local_scores, c17):
+    key=f'{date_str}:{int(period):04d}'
+    if not OPENAI_API_KEY: return {'enabled':False,'ready':False,'status':'未配置OPENAI_API_KEY'}
+    if any(str(i) not in groups for i in range(1,18)):
+        return {'enabled':True,'ready':False,'status':'等待当前期1-17组'}
+    with _deep_ai_lock:
+        existing=_deep_ai_cache.get(key)
+        if existing: return dict(existing)
+        _deep_ai_cache[key]={'enabled':True,'ready':False,'status':'深度复核中','period':int(period),'pending':True}
+    features=build_deep_ai_features(date_str,period,groups,historical,relation,local_scores,c17)
+    _deep_ai_executor.submit(run_deep_ai,key,features)
+    return {'enabled':True,'ready':False,'status':'深度复核中','period':int(period)}
+
 def ai_analysis_from_data(groups, historical, relation=None):
     """Adaptive 8-class scoring model.
 
@@ -1226,13 +1298,15 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
         actual=int(latest_verified['actual_single'])
         hit_position=(pred.index(actual)+1) if actual in pred else None
         latest_result={'period':int(latest_verified['period_no']), 'top3':pred, 'actual':actual, 'hit':bool(hit_position), 'hitPosition':hit_position}
+    c17_for_deep=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
+    deep=deep_ai_summary(date_str,period,groups,historical,relation,scores,c17_for_deep)
     result={'single':ai_single,'scores':scores,'historicalSample':len(historical),
             'frozen':bool(row),'period':int(row['period_no']) if row else int(period),
             'top3':display_top3,'verifiedSample':verified,'hits':hits,
             'top3Hits':top3_hits,'top3HitRate':round(top3_hits/verified*100,2) if verified else None,'latestVerified':latest_result,
             'hitRate':round(hits/verified*100,2) if verified else None,
             'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,
-            'relationTop3':relation_top3,'relationSample':relation.get('samplePeriods',0)}
+            'relationTop3':relation_top3,'relationSample':relation.get('samplePeriods',0),'deepAI':deep}
     with _ai_summary_cache_lock:
         _ai_summary_cache.update({'key':key,'at':time.time(),'value':dict(result)})
     return result
