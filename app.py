@@ -310,7 +310,22 @@ def draw():
         # Return dedicated result fields as well as the legacy state fields.
         # This keeps the frontend stable even when the current period is still
         # waiting for group 20 or when an older confirmed result is being kept.
-        saved_numbers = state.get('numbers') if isinstance(state.get('numbers'), list) else []
+        # Build one authoritative result object. Prefer confirmed group 20, then
+        # the persisted confirmed result. This prevents the UI from losing the
+        # numbers when the current-period cache is refreshed.
+        result_obj = None
+        g20 = groups.get('20') if isinstance(groups, dict) else None
+        if isinstance(g20, dict) and isinstance(g20.get('numbers'), list) and len(g20.get('numbers')) == 7:
+            result_obj = g20
+        elif isinstance(state.get('numbers'), list) and len(state.get('numbers')) == 7:
+            result_obj = {
+                'numbers': state.get('numbers'),
+                'singleCount': state.get('singleCount'),
+                'blockNumber': state.get('blockNumber'),
+                'block': state.get('block'),
+                'platformPeriod': state.get('platformPeriod'),
+            }
+        saved_numbers = result_obj.get('numbers', []) if result_obj else []
         saved_omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
         saved_omission = {str(i): int(saved_omission.get(str(i), 0) or 0) for i in range(8)}
         response = {
@@ -320,9 +335,10 @@ def draw():
             'targetResultBlock': target20,
             'officialReady': bool(official),
             'resultNumbers': saved_numbers,
-            'resultSingleCount': state.get('singleCount'),
-            'resultBlockNumber': state.get('blockNumber'),
-            'resultPlatformPeriod': state.get('platformPeriod'),
+            'resultSingleCount': result_obj.get('singleCount') if result_obj else None,
+            'resultBlockNumber': result_obj.get('blockNumber') if result_obj else None,
+            'resultPlatformPeriod': result_obj.get('platformPeriod') if result_obj and result_obj.get('platformPeriod') else (state.get('platformPeriod') if saved_numbers else None),
+            'result': result_obj,
             'omission': saved_omission,
             'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
             'dataStats': current_stats,
@@ -346,6 +362,13 @@ def draw():
                 'resultSingleCount': state.get('singleCount'),
                 'resultBlockNumber': state.get('blockNumber'),
                 'resultPlatformPeriod': state.get('platformPeriod'),
+                'result': {
+                    'numbers': state.get('numbers', []),
+                    'singleCount': state.get('singleCount'),
+                    'blockNumber': state.get('blockNumber'),
+                    'block': state.get('block'),
+                    'platformPeriod': state.get('platformPeriod')
+                },
                 'omission': saved_omission,
                 'dataStats': stats_from_groups(state.get('groups', {})),
                 'ok': True,

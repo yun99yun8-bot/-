@@ -144,11 +144,14 @@
       // Result fields are deliberately read from the confirmed-result keys.
       // The API may simultaneously report the current period while retaining
       // the previous confirmed result until the new group-20 block exists.
-      const resultNumbers = Array.isArray(data.resultNumbers) ? data.resultNumbers : (Array.isArray(data.numbers) ? data.numbers : []);
-      document.getElementById('periodValue').textContent=data.resultPlatformPeriod || data.platformPeriod || data.period || '0000000000';
-      document.getElementById('singleValue').textContent=(data.resultSingleCount ?? data.singleCount ?? '--');
-      document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=resultNumbers[i] || '--';});
-      document.getElementById('blockValue').textContent=data.resultBlockNumber ?? data.blockNumber ?? '--';
+      // Result priority: explicit result object -> group 20 -> legacy fields.
+      const g20 = Array.isArray(data.groups) ? data.groups.find(g=>Number(g.group)===20) : null;
+      const result = (data.result && Array.isArray(data.result.numbers) && data.result.numbers.length===7) ? data.result : (g20 && Array.isArray(g20.numbers) && g20.numbers.length===7 ? g20 : null);
+      const resultNumbers = result?.numbers || (Array.isArray(data.resultNumbers) ? data.resultNumbers : (Array.isArray(data.numbers) ? data.numbers : []));
+      document.getElementById('periodValue').textContent=result?.platformPeriod || data.resultPlatformPeriod || data.platformPeriod || data.period || '0000000000';
+      document.getElementById('singleValue').textContent=(result?.singleCount ?? data.resultSingleCount ?? data.singleCount ?? '--');
+      document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=(resultNumbers[i] ?? '--');});
+      document.getElementById('blockValue').textContent=result?.blockNumber ?? data.resultBlockNumber ?? data.blockNumber ?? '--';
       renderStats(data);
       renderOmission(data);
       renderGroups(data.groups||[]);
