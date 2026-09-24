@@ -180,3 +180,13 @@ AI statistical analysis module:
 - AI/历史接口和正式开奖结果继续完全分离，AI请求卡住不能阻止正式结果更新。
 - system-health 新增 db-writer、tron-ingest、target-result-fast、ai-prediction、smart-db 五条后台任务心跳及 ageSeconds/healthy 状态。
 - 模型版本标记为 v7.3-stable-1。
+
+
+## V8 Autonomous Engine
+- 新增独立 period-engine：服务器自己推进每期 COLLECTING → G17_READY → AI_LOCKED → RESULT_READY → VERIFIED。
+- 第20组已经出现但开奖前没有合法预测时标记 MISSED_PREDICTION，绝不开奖后补造。
+- 新增 period_runtime 持久状态表；进程重启后可根据数据库和现有区块重新判断当前阶段。
+- 新增 supervisor：后台worker异常退出会自动重启，并把重启事件写入 system_events。
+- system-health 新增 period-engine/supervisor 心跳、workerRestarts、currentPeriodState。
+- 网页只是显示器；AI锁定、开奖、验证、数据库保存均不依赖手机页面请求。
+- V8增强可靠性、故障隔离和可恢复性，不承诺TRON密码学哈希存在可持续预测优势。

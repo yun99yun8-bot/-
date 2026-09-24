@@ -61,10 +61,15 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v7.3-stable-1'
+MODEL_VERSION = 'v8-autonomous-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
+_worker_threads = {}
+_worker_threads_lock = threading.Lock()
+_worker_restarts = {}
+AUTONOMOUS_STATES = ('COLLECTING','G17_READY','AI_LOCKED','WAIT_G20','RESULT_READY','VERIFIED','COMPLETE','MISSED_PREDICTION')
+
 
 
 def worker_touch(name, error=None):
@@ -424,6 +429,22 @@ def init_db():
                     )
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_system_events_created ON system_events(created_at DESC)")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS period_runtime (
+                        period_key TEXT PRIMARY KEY,
+                        period_date DATE NOT NULL,
+                        period_no INTEGER NOT NULL,
+                        target_block BIGINT NOT NULL,
+                        state TEXT NOT NULL DEFAULT 'COLLECTING',
+                        groups_seen SMALLINT NOT NULL DEFAULT 0,
+                        prediction_locked_at TIMESTAMPTZ,
+                        result_ready_at TIMESTAMPTZ,
+                        verified_at TIMESTAMPTZ,
+                        last_error TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_period_runtime_updated ON period_runtime(updated_at DESC)")
         return True
     finally:
         db_release(conn)
@@ -720,6 +741,107 @@ def repair_recent_periods(limit=6):
     return repaired
 
 
+def set_period_runtime(date_str, period, target, state, groups_seen=0, error=None):
+    key=f'{date_str}:{int(period):04d}'
+    conn=None
+    try:
+        conn=db_connect(retries=0)
+        if conn is None:return
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO period_runtime(period_key,period_date,period_no,target_block,state,groups_seen,last_error,updated_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,NOW())
+                    ON CONFLICT(period_key) DO UPDATE SET
+                      target_block=EXCLUDED.target_block,state=EXCLUDED.state,
+                      groups_seen=GREATEST(period_runtime.groups_seen,EXCLUDED.groups_seen),
+                      last_error=EXCLUDED.last_error,updated_at=NOW()
+                """,(key,date_str,int(period),int(target),state,int(groups_seen),error))
+                if state=='AI_LOCKED':
+                    cur.execute("UPDATE period_runtime SET prediction_locked_at=COALESCE(prediction_locked_at,NOW()) WHERE period_key=%s",(key,))
+                elif state=='RESULT_READY':
+                    cur.execute("UPDATE period_runtime SET result_ready_at=COALESCE(result_ready_at,NOW()) WHERE period_key=%s",(key,))
+                elif state in ('VERIFIED','COMPLETE'):
+                    cur.execute("UPDATE period_runtime SET verified_at=COALESCE(verified_at,NOW()) WHERE period_key=%s",(key,))
+    except Exception as exc:
+        with _runtime_health_lock:_runtime_health['lastDbError']=str(exc)[:300]
+    finally:
+        if conn is not None:db_release(conn)
+
+
+def prediction_exists(period_key):
+    conn=None
+    try:
+        conn=db_connect(retries=0)
+        with conn.cursor() as cur:
+            cur.execute("SELECT actual_single,locked_at FROM ai_predictions WHERE period_key=%s",(period_key,))
+            return cur.fetchone()
+    except Exception:return None
+    finally:
+        if conn is not None:db_release(conn)
+
+
+def autonomous_period_worker():
+    """Durable period state machine. Browser requests are never part of the lifecycle."""
+    while True:
+        worker_touch('period-engine')
+        try:
+            ds,p,_,_=current_period(); target=period_target_block(ds,p); key=f'{ds}:{int(p):04d}'
+            groups,_=collect_groups_live(ds,p); seen=len(groups); official=groups.get('20')
+            if official:
+                row=prediction_exists(key)
+                if row is None:
+                    # Never fabricate a prediction after the result exists.
+                    set_period_runtime(ds,p,target,'MISSED_PREDICTION',seen)
+                else:
+                    set_period_runtime(ds,p,target,'RESULT_READY',seen)
+                    try:
+                        if verify_prediction(ds,p,official):
+                            set_period_runtime(ds,p,target,'VERIFIED',seen)
+                    except Exception as exc:
+                        set_period_runtime(ds,p,target,'RESULT_READY',seen,str(exc)[:300])
+            elif all(str(i) in groups for i in range(1,18)):
+                set_period_runtime(ds,p,target,'G17_READY',seen)
+                try:
+                    save_conclusion17_if_ready(ds,p,groups,target)
+                    save_prediction_if_ready(ds,p,groups,target,force_backend=True)
+                    flush_pending_ai_predictions()
+                    if prediction_exists(key) is not None:
+                        set_period_runtime(ds,p,target,'AI_LOCKED',seen)
+                except Exception as exc:
+                    set_period_runtime(ds,p,target,'G17_READY',seen,str(exc)[:300])
+            else:
+                set_period_runtime(ds,p,target,'COLLECTING',seen)
+        except Exception as exc:
+            worker_touch('period-engine',exc)
+        time.sleep(0.40)
+
+
+def _start_managed_worker(name, target):
+    th=threading.Thread(target=target,name=name,daemon=True)
+    with _worker_threads_lock:_worker_threads[name]=th
+    th.start(); return th
+
+
+def supervisor_worker():
+    """Restart workers that exit. Heartbeats expose blocked workers for diagnosis."""
+    targets={'db-writer':db_writer_worker,'tron-ingest':tron_ingest_worker,
+             'target-result-fast':target_result_fast_worker,'ai-prediction':ai_prediction_worker,
+             'smart-db':smart_db_worker,'period-engine':autonomous_period_worker}
+    while True:
+        worker_touch('supervisor')
+        for name,target in targets.items():
+            with _worker_threads_lock: th=_worker_threads.get(name)
+            if th is None or not th.is_alive():
+                try:
+                    _start_managed_worker(name,target)
+                    with _runtime_health_lock:
+                        _worker_restarts[name]=int(_worker_restarts.get(name,0))+1
+                    record_system_event('worker_restart',None,{'worker':name,'count':_worker_restarts[name]})
+                except Exception as exc: worker_touch('supervisor',exc)
+        time.sleep(3.0)
+
+
 def smart_db_worker():
     """Continuously materialize current period and repair recent holes."""
     last_repair=0
@@ -780,11 +902,13 @@ def start_worker_once():
         if _worker_started:
             return
         _worker_started = True
-        threading.Thread(target=db_writer_worker, name='db-writer', daemon=True).start()
-        threading.Thread(target=tron_ingest_worker, name='tron-ingest', daemon=True).start()
-        threading.Thread(target=target_result_fast_worker, name='target-result-fast', daemon=True).start()
-        threading.Thread(target=ai_prediction_worker, name='ai-prediction', daemon=True).start()
-        threading.Thread(target=smart_db_worker, name='smart-db', daemon=True).start()
+        _start_managed_worker('db-writer',db_writer_worker)
+        _start_managed_worker('tron-ingest',tron_ingest_worker)
+        _start_managed_worker('target-result-fast',target_result_fast_worker)
+        _start_managed_worker('ai-prediction',ai_prediction_worker)
+        _start_managed_worker('smart-db',smart_db_worker)
+        _start_managed_worker('period-engine',autonomous_period_worker)
+        _start_managed_worker('supervisor',supervisor_worker)
 
 
 def collect_period_groups(date_str, period, latest_number, state):
@@ -1774,13 +1898,16 @@ def result_fast():
 @app.get('/api/system-health')
 def system_health():
     ds,p,ps,platform=current_period()
-    conn=None; counts={'periodGroups':0,'predictions':0,'events':0}
+    conn=None; counts={'periodGroups':0,'predictions':0,'events':0,'runtimePeriods':0}
     try:
         conn=db_connect()
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM period_groups"); counts['periodGroups']=int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM ai_predictions"); counts['predictions']=int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM system_events"); counts['events']=int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM period_runtime"); counts['runtimePeriods']=int(cur.fetchone()[0])
+            cur.execute("SELECT state,groups_seen,updated_at,last_error FROM period_runtime WHERE period_key=%s",(f'{ds}:{int(p):04d}',))
+            pr=cur.fetchone()
         runtime=dict(_runtime_health)
         hb=dict(runtime.get('workerHeartbeats') or {})
         now=datetime.now(CN_TZ); worker_status={}
@@ -1790,6 +1917,8 @@ def system_health():
             except Exception: age=999999
             worker_status[name]={'lastHeartbeat':stamp,'ageSeconds':round(age,1),'healthy':age < 12}
         runtime['workers']=worker_status
+        runtime['workerRestarts']=dict(_worker_restarts)
+        runtime['currentPeriodState']=dict(pr) if pr else None
         return jsonify({'ok':True,'period':ps,'platformPeriod':platform,'modelVersion':MODEL_VERSION,
                         'counts':counts,'runtime':runtime})
     except Exception as exc:
