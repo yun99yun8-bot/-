@@ -1025,8 +1025,20 @@ def ai_analysis_from_data(groups, historical, relation=None):
     pick = ranked[0]
     return pick, {str(i): round(scores[i], 2) for i in range(8)}
 
-def ai_conclusion17_from_data(groups, historical):
-    """17-group conclusion model. Returns a model tendency, not a guaranteed probability."""
+def ai_conclusion17_from_data(groups, historical, date_str=None, period=None, target20=None):
+    """17-group conclusion model using ONLY groups 1..17 of one exact period.
+
+    When period identity is supplied, every source row is verified against that
+    period's expected block number. This prevents rows from a previous/next
+    period or a stale cache from being mixed into the 17-group model.
+    """
+    if date_str is not None and period is not None:
+        target20 = int(target20 if target20 is not None else period_target_block(date_str, period))
+        for i in range(1, 18):
+            row = groups.get(str(i)) if isinstance(groups, dict) else None
+            expected = target20 - (20 - i)
+            if not row or int(row.get('blockNumber', -1)) != expected:
+                return None
     vals=[int(groups[str(i)]['singleCount']) for i in range(1,18)
           if str(i) in groups and groups[str(i)].get('singleCount') is not None]
     if len(vals) < 17:
@@ -1065,7 +1077,7 @@ def save_conclusion17_if_ready(date_str, period, groups, target20):
     if groups.get('20') or any(str(i) not in groups for i in range(1,18)):
         return None
     historical=get_historical_official_singles(date_str,period)
-    model=ai_conclusion17_from_data(groups,historical)
+    model=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
     if not model: return None
     key=f'{date_str}:{int(period):04d}'
     conn=db_connect()
@@ -1332,7 +1344,11 @@ def draw():
         ui_countdown = request.args.get('ai_lock_countdown', type=int)
         ai_info = prediction_summary(date_str, period, groups, target20, official, ui_countdown)
         historical_for_17 = get_historical_official_singles(date_str, period)
-        ai17 = ai_conclusion17_from_data(groups, historical_for_17)
+        ai17 = ai_conclusion17_from_data(groups, historical_for_17, date_str, period, target20)
+        if ai17:
+            ai17 = {**ai17, 'period': period_str, 'platformPeriod': platform_period, 'periodKey': f'{date_str}:{period_str}',
+                    'sourceGroups': list(range(1,18)),
+                    'sourceBlocks': [int(groups[str(i)]['blockNumber']) for i in range(1,18)]}
         if ai17 and not official:
             try: save_conclusion17_if_ready(date_str, period, groups, target20)
             except Exception: pass

@@ -48,6 +48,11 @@
           <div class="stat" data-single="0">单0<small>--期</small></div><div class="stat" data-single="1">单1<small>--期</small></div><div class="stat" data-single="2">单2<small>--期</small></div><div class="stat" data-single="3">单3<small>--期</small></div><div class="stat" data-single="4">单4<small>--期</small></div><div class="stat" data-single="5">单5<small>--期</small></div><div class="stat" data-single="6">单6<small>--期</small></div><div class="stat" data-single="7">单7<small>--期</small></div>
         </div>
       </section>
+
+      <section class="card history-section home-recent20">
+        <div class="section-title">最近20期正式结果</div>
+        <div class="history20-grid" id="resultHistory20"><div class="history20-item waiting">等待数据</div></div>
+      </section>
     </main>
 
     <main class="content" id="historyContent" hidden>
@@ -63,14 +68,10 @@
         <div class="history20-note">固定显示第1～20组；未取得的组显示等待数据。</div>
         <div class="group-table-wrap"><table class="group-table"><thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead><tbody id="groupTableBody"><tr><td colspan="4">等待数据</td></tr></tbody></table></div>
       </section>
-      <section class="card history-section">
-        <div class="section-title">三、最近20期正式结果</div>
-        <div class="history20-grid" id="resultHistory20"><div class="history20-item waiting">等待数据</div></div>
-      </section>
-      <section class="card history-section"><div class="section-title">四、历史AI验证</div><div class="placeholder" id="historyModel">正在读取历史模型数据…</div></section>
-      <section class="card history-section"><div class="section-title">五、历史开奖记录</div><div class="placeholder table-placeholder" id="historyDraws">正在读取历史开奖记录…</div></section>
-      <section class="card history-section"><div class="section-title">六、历史预判记录</div><div class="placeholder table-placeholder" id="historyPredictions">正在读取历史预判记录…</div></section>
-      <section class="card history-section"><div class="section-title">七、AI规律库（滚动1000期）</div><div class="placeholder table-placeholder" id="patternInsights">正在读取遗漏卡期、长期分布和哈希结构…</div></section>
+      <section class="card history-section"><div class="section-title">三、历史AI验证</div><div class="placeholder" id="historyModel">正在读取历史模型数据…</div></section>
+      <section class="card history-section"><div class="section-title">四、历史开奖记录</div><div class="placeholder table-placeholder" id="historyDraws">正在读取历史开奖记录…</div></section>
+      <section class="card history-section"><div class="section-title">五、历史预判记录</div><div class="placeholder table-placeholder" id="historyPredictions">正在读取历史预判记录…</div></section>
+      <section class="card history-section"><div class="section-title">六、AI规律库（滚动1000期）</div><div class="placeholder table-placeholder" id="patternInsights">正在读取遗漏卡期、长期分布和哈希结构…</div></section>
     </main>
   </div>
 <script>
@@ -137,8 +138,11 @@
     // Conclusion is now a separate 17-group AI model. Raw frequency boxes above
     // remain descriptive statistics and are not presented as a prediction.
     var c17=data.aiConclusion17||null;
-    if(c17 && (c17.single===0 || c17.single)){
-      text('statsConclusion','AI结论：单'+c17.single+'　｜　17组模型　｜　'+(c17.mode||'综合倾向')+'　｜　已锁定');
+    var currentP=String(data.currentPeriod||'').padStart(4,'0');
+    var c17P=c17?String(c17.period||'').padStart(4,'0'):'';
+    var c17Exact=!!(c17 && c17P===currentP && Array.isArray(c17.sourceBlocks) && c17.sourceBlocks.length===17);
+    if(c17Exact && (c17.single===0 || c17.single)){
+      text('statsConclusion','AI结论：单'+c17.single+'　｜　第'+c17P+'期1-17组　｜　'+(c17.mode||'综合倾向')+'　｜　已锁定');
     }else{
       text('statsConclusion','AI结论：正在收集前17组数据（'+Math.min(sample,17)+'/17）');
     }
