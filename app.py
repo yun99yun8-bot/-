@@ -221,50 +221,67 @@ def current_position(target, chain_block):
 
 
 def group_block_for_position(day, idx, position, target=None):
-    """Resolve the actual TRON block produced in a 3-second platform slot.
-    The slot timestamp, not block-height arithmetic, is authoritative. If the
-    scheduled slot was missed there may be no block for that group.
+    """Resolve the real TRON block for one of the 20 three-second slots.
+
+    The platform's period is a minute and its 20 groups are the 20 time slots
+    inside that minute.  We therefore use the block timestamp as the source of
+    truth.  Block height is used only to narrow the API search window; it is
+    never used as ``previous + 20``.
     """
     from zoneinfo import ZoneInfo
-    tz=ZoneInfo(os.getenv("APP_TIMEZONE","Asia/Shanghai"))
+    tz=ZoneInfo(os.getenv("APP_TIMEZONE", "Asia/Shanghai"))
     base=datetime.strptime(day,"%Y-%m-%d").replace(tzinfo=tz)+timedelta(minutes=int(idx))
     slot_start=base+timedelta(seconds=(int(position)-1)*3)
     slot_end=slot_start+timedelta(seconds=3)
     start_ms=int(slot_start.timestamp()*1000)
     end_ms=int(slot_end.timestamp()*1000)
+
+    with lock:
+        chain=latest.get("chain_block")
+    if chain is None:
+        return None
+
+    # Estimate the height from the chain head and the slot midpoint.  Search
+    # broadly enough to tolerate missed TRON slots.  The timestamp filter below
+    # is authoritative, so a +18/+19/+20 height jump is handled naturally.
     now_utc=datetime.now(timezone.utc)
-    with lock: chain=latest.get("chain_block")
-    if chain is None: return None
-    # Estimate the height from the current chain head and the slot midpoint.
-    slot_mid=(slot_start+timedelta(seconds=1.5)).astimezone(timezone.utc)
-    age=(now_utc-slot_mid).total_seconds()
+    slot_mid=slot_start+timedelta(seconds=1.5)
+    age=(now_utc-slot_mid.astimezone(timezone.utc)).total_seconds()
     center=int(round(int(chain)-age/3.0))
-    if target is not None and int(position)==20:
-        center=int(target)
     center=max(1,center)
-    lo=max(1,center-16); hi=min(int(chain),center+16)
+    lo=max(1,center-32)
+    hi=min(int(chain)+32,center+32)
+
     candidates=[]
     for b in range(lo,hi+1):
         data=fetch_block_checked(b)
-        if not data: continue
-        ts=int(data["block_header"]["raw_data"]["timestamp"])
+        if not data:
+            continue
+        raw=data.get("block_header",{}).get("raw_data",{})
+        ts=raw.get("timestamp")
+        if ts is None:
+            continue
+        ts=int(ts)
         if start_ms <= ts < end_ms:
-            candidates.append((ts,b,data))
+            candidates.append((ts,int(raw.get("number",b)),data))
+
     if not candidates:
         return None
-    # One slot should contain at most one canonical block. Choose the earliest
-    # block in the slot if an API response is duplicated around a boundary.
-    candidates.sort(key=lambda x:(x[0],x[1]))
+
+    # A slot normally has one block. If more than one is returned around a
+    # boundary, use the block whose timestamp is closest to the slot midpoint.
+    mid_ms=(start_ms+end_ms)//2
+    candidates.sort(key=lambda x:(abs(x[0]-mid_ms),x[1]))
     return candidates[0][2]
 
 def save_minute_block(day, idx, pos, block, block_hash, calc, ts):
     with lock:
         c=db(); c.execute("""INSERT OR IGNORE INTO minute_blocks(day,period_index,position,block,hash,odd,even,numbers,ts,source_version)
-             VALUES(?,?,?,?,?,?,?,?,?,2)""",(day,idx,pos,int(block),block_hash,calc["odd"],calc["even"],",".join(map(str,calc["numbers"])),ts)); c.commit(); c.close()
+             VALUES(?,?,?,?,?,?,?,?,?,3)""",(day,idx,pos,int(block),block_hash,calc["odd"],calc["even"],",".join(map(str,calc["numbers"])),ts)); c.commit(); c.close()
 
 
 def get_minute_blocks(day, idx, upto=None):
-    q="SELECT * FROM minute_blocks WHERE day=? AND period_index=? AND source_version=2"
+    q="SELECT * FROM minute_blocks WHERE day=? AND period_index=? AND source_version=3"
     args=[day,idx]
     if upto is not None: q+=" AND position<=?"; args.append(int(upto))
     q+=" ORDER BY position"
