@@ -371,6 +371,25 @@ def predict_cycle(cycle, records):
     return candidates[0]
 
 
+def historical_prediction(all_rows):
+    """历史统计页专用：基于全部已开奖历史数据做综合统计倾向。
+    与20期预判完全独立，不读取当前20期的prediction。
+    """
+    if not all_rows:
+        return None
+    counts = Counter(f"{r['odd']}单{r['even']}双" for r in all_rows)
+    max_count = max(counts.values())
+    candidates = [k for k, v in counts.items() if v == max_count]
+    if len(candidates) == 1:
+        return candidates[0]
+    # 同频时用最近一次出现的组合作为统计参考，只用于历史数据展示。
+    for r in reversed(all_rows):
+        key = f"{r['odd']}单{r['even']}双"
+        if key in candidates:
+            return key
+    return candidates[0]
+
+
 def sync_completed_cycles():
     """补齐历史数据中的已锁定/已完成20组周期。"""
     with lock:
@@ -555,11 +574,15 @@ def state():
     hits = int(done["h"] or 0)
 
     recent60 = all_rows[-60:]
+    # 王者归来页面底部只展示最近60期；历史统计页单独展示全部历史。
     single_counts = {str(i): 0 for i in range(1, 8)}
     combo_counts = Counter()
     for r in recent60:
         single_counts[str(r["odd"])] += 1
         combo_counts[f"{r['odd']}单{r['even']}双"] += 1
+
+    # 历史统计页的预判与20期预判完全分开：综合全部历史开奖记录。
+    history_prediction = historical_prediction(all_rows)
 
     daily = {}
     for r in all_rows:
@@ -568,6 +591,12 @@ def state():
         daily[day_key][f"{r['odd']}单{r['even']}双"] += 1
 
     latest_copy = dict(latest)
+    # 顶部开奖区块始终显示“当前北京时间分钟”对应的目标区块，
+    # 不依赖上一期是否已经成功写入数据库，避免页面卡在旧区块。
+    current_target, target_confirmed = target_block_for_datetime(local_now)
+    if current_target is not None:
+        latest_copy["target_block"] = current_target
+        latest_copy["confirmed_anchor"] = target_confirmed
     # 顶部“当前期数”使用当天1～1440期，而不是累计总期数。
     latest_copy["display_period"] = f"{idx + 1:04d}"
     latest_copy["display_day"] = day
@@ -590,7 +619,9 @@ def state():
         "single_counts": single_counts,
         "combo_counts": dict(combo_counts.most_common()),
         "cycles": [dict(x) for x in cycles],
-        "history": [dict(x) for x in recent60[::-1]],
+        "history_recent60": [dict(x) for x in recent60[::-1]],
+        "history_all": [dict(x) for x in reversed(all_rows)],
+        "history_prediction": history_prediction,
         "daily": {k: dict(v.most_common()) for k, v in sorted(daily.items(), reverse=True)},
         "history_count": len(all_rows),
     }
@@ -635,7 +666,7 @@ th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-alig
 <div class="wrap">
 
 <div class="tabs">
-<button id="b1" class="on" onclick="tab(1)">20组预判</button>
+<button id="b1" class="on" onclick="tab(1)">王者归来</button>
 <button id="b2" onclick="tab(2)">历史统计</button>
 </div>
 
@@ -644,20 +675,20 @@ th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-alig
 <div class="card">
 <div class="box"><div class="label">当前时间</div><div class="big" id="currentTime">-</div></div>
 <div class="box"><div class="label">当天期数（1～1440）</div><div class="big" id="period">-</div></div>
-<div class="box"><div class="label">20组进度（每天72组）</div><div class="big" id="pos">-</div></div>
+<div class="box"><div class="label">20期进度</div><div class="big" id="pos">-</div></div>
 <div class="box"><div class="label">开奖区块</div><div class="big" id="block">-</div></div>
 <div class="box"><div class="label">链上当前区块</div><div class="big" id="chain">-</div></div>
 </div>
 </div>
 
 <div class="card center">
-<div class="label" id="cycleLabel">当前20组状态</div>
+<div class="label" id="cycleLabel">当前20期状态</div>
 <div class="status" id="status">等待中</div>
 
-<div class="label">第17组后统计预判第20组</div>
+<div class="label">第17期统计预判第20期</div>
 <div class="status" id="pred">等待第17组</div>
 
-<div class="label">第20组实际结果</div>
+<div class="label">第20期实际结果</div>
 <div class="status" id="actual">等待第20组</div>
 
 <div class="nums" id="nums">-</div>
@@ -675,19 +706,25 @@ th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-alig
 </div>
 
 <div class="card">
-<b>最近20组预判记录</b>
+<b>最近20期预判记录</b>
 <table>
-<thead><tr><th>日期/组</th><th>预判</th><th>实际</th><th>结果</th></tr></thead>
+<thead><tr><th>日期</th><th>预判</th><th>实际</th><th>结果</th></tr></thead>
 <tbody id="cycles"></tbody>
 </table>
 </div>
 
 <div class="card note">
-每天固定1440期：0001～1440；1440期结束后次日重新从0001开始。每天72个20组周期。开奖区块按已核对的平台“期数—区块”关系同步。
+每天固定1440期：0001～1440；1440期结束后次日重新从0001开始。每20期为一份，只在第17期生成第20期的统计预判，第18、19期锁定不变，第20期结算。页面不显示第几组。开奖区块按当前时间对应的目标区块同步。
 </div>
 </section>
 
 <section id="s2" class="section">
+
+<div class="card center">
+<div class="label">历史统计预判</div>
+<div class="status" id="historyPrediction">暂无历史数据</div>
+<div class="note">此处只依据全部历史开奖记录综合统计，与“王者归来”的20期预判独立。</div>
+</div>
 
 <div class="card">
 <b>最近60期：1～7单出现次数</b>
@@ -705,7 +742,7 @@ th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-alig
 </div>
 
 <div class="card">
-<b>最近60期历史记录</b>
+<b>全部历史记录</b>
 <table>
 <thead><tr><th>期数</th><th>区块</th><th>7号码</th><th>单双</th></tr></thead>
 <tbody id="hist"></tbody>
@@ -736,13 +773,13 @@ async function refresh(){
 
   document.getElementById('currentTime').textContent=d.current_time||'-';
   document.getElementById('period').textContent=d.display_period+'期';
-  document.getElementById('pos').textContent=d.current_pos+'/20（第'+d.current_cycle+'组）';
-  document.getElementById('cycleLabel').textContent=d.day+'｜第'+d.current_cycle+'组（'+d.current_pos+'/20）';
+  document.getElementById('pos').textContent=d.current_pos+'/20';
+  document.getElementById('cycleLabel').textContent=d.day+'｜当前20期：'+d.current_pos+'/20';
   document.getElementById('block').textContent=l.target_block||l.block||'-';
   document.getElementById('chain').textContent=l.chain_block||'-';
 
-  document.getElementById('pred').textContent=d.prediction||'等待第17组';
-  document.getElementById('actual').textContent=d.actual||'等待第20组';
+  document.getElementById('pred').textContent=d.prediction||'等待第17期';
+  document.getElementById('actual').textContent=d.actual||'等待第20期';
   document.getElementById('status').textContent=d.actual?'已开奖':'等待中';
 
   document.getElementById('nums').textContent=
@@ -761,7 +798,7 @@ async function refresh(){
   document.getElementById('rate').textContent=d.hit_rate+'%';
 
   document.getElementById('cycles').innerHTML=d.cycles.map(x=>
-   '<tr><td>'+esc(x.day)+'<br>第'+x.cycle+'组</td><td>'+esc(x.prediction)+'</td><td>'+
+   '<tr><td>'+esc(x.day)+'</td><td>'+esc(x.prediction)+'</td><td>'+
    esc(x.actual)+'</td><td>'+(x.hit?'✅':'❌')+'</td></tr>'
   ).join('');
 
@@ -782,7 +819,9 @@ async function refresh(){
    '</span></div>'
   ).join('')||'暂无';
 
-  document.getElementById('hist').innerHTML=d.history.map(x=>
+  document.getElementById('historyPrediction').textContent=d.history_prediction||'暂无历史数据';
+
+  document.getElementById('hist').innerHTML=(d.history_all||[]).map(x=>
    '<tr><td>'+esc(x.period)+'</td><td>'+x.block+'</td><td>'+
    x.numbers.split(',').map(n=>String(n).padStart(2,'0')).join(' ')+'</td><td>'+
    x.odd+'单'+x.even+'双</td></tr>'
