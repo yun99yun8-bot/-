@@ -62,7 +62,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.1-multidimensional-research-ai-1'
+MODEL_VERSION = 'v9.3-exploratory-multidimensional-ai-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -1455,7 +1455,7 @@ def stats_from_groups(groups):
 
 
 
-def get_historical_official_singles(date_str, period, limit=720):
+def get_historical_official_singles(date_str, period, limit=1000):
     """Return prior official group-20 singles using calibrated period targets.
 
     This avoids assuming every historical boundary is exactly +20 blocks; known
@@ -1862,14 +1862,18 @@ def research_model_performance(limit=500):
     Scores are shrunk toward neutral when the sample is small.
     """
     names=['long','short','structure17','transition','omission','hash_context','relation','binomial']
-    perf={n:{'n':0,'top1':0,'top3':0} for n in names}
+    perf={n:{'n':0,'top1':0,'top3':0,'pairedWins':0,'pairedLosses':0} for n in names}
     conn=db_connect()
     if conn is None: return perf
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""SELECT actual_single,ensemble_detail FROM ai_predictions
-                           WHERE actual_single IS NOT NULL AND ensemble_detail IS NOT NULL
-                           ORDER BY period_date DESC,period_no DESC LIMIT %s""",(int(limit),))
+            cur.execute("""SELECT p.actual_single,p.ensemble_detail FROM ai_predictions p
+                           JOIN tron_blocks b ON b.block_number=p.target_block
+                           WHERE p.actual_single IS NOT NULL AND p.ensemble_detail IS NOT NULL
+                             AND p.model_version LIKE 'v9.%%'
+                             AND p.locked_at IS NOT NULL AND b.block_time IS NOT NULL
+                             AND p.locked_at < b.block_time
+                           ORDER BY p.period_date DESC,p.period_no DESC LIMIT %s""",(int(limit),))
             rows=cur.fetchall()
         for r in rows:
             actual=int(r['actual_single']); detail=r.get('ensemble_detail') or {}
@@ -1877,6 +1881,11 @@ def research_model_performance(limit=500):
                 try: detail=json.loads(detail)
                 except Exception: detail={}
             parts=detail.get('components') or {}
+            baseline=parts.get('binomial')
+            if not isinstance(baseline,dict): continue
+            try: baseline_rank=_candidate_rank({int(k):float(v) for k,v in baseline.items()})
+            except (TypeError,ValueError): continue
+            baseline_hit=bool(baseline_rank and baseline_rank[0]==actual)
             for n in names:
                 comp=parts.get(n)
                 if not isinstance(comp,dict): continue
@@ -1886,10 +1895,18 @@ def research_model_performance(limit=500):
                 perf[n]['n']+=1
                 perf[n]['top1']+=int(bool(rank and rank[0]==actual))
                 perf[n]['top3']+=int(actual in rank[:3])
+                if n != 'binomial':
+                    hit=bool(rank and rank[0]==actual)
+                    perf[n]['pairedWins']+=int(hit and not baseline_hit)
+                    perf[n]['pairedLosses']+=int(baseline_hit and not hit)
     finally: db_release(conn)
     for n,v in perf.items():
         nn=v['n']; v['top1Rate']=round(v['top1']/nn*100,2) if nn else None
         v['top3Rate']=round(v['top3']/nn*100,2) if nn else None
+        delta=(v['pairedWins']-v['pairedLosses'])/nn if nn else 0.0
+        variance=max(0.0,(v['pairedWins']+v['pairedLosses'])/nn-delta*delta) if nn else 0.0
+        v['pairedLift']=round(delta*100,2) if nn else None
+        v['pairedSE']=round((variance/nn)**0.5*100,2) if nn else None
     return perf
 
 
@@ -1983,39 +2000,45 @@ def v9_research_ensemble(groups, historical, relation=None):
            'omission':omit,'hash_context':hash_context,'relation':relation_s,'binomial':binomial}
 
     perf=research_model_performance(500)
-    # Neutral prior + out-of-sample evidence. Top1 matters most; Top3 is secondary.
-    raww={}
+    # Explicitly exploratory prior: use current, pre-result information even
+    # before enough verified periods exist. These are fixed design weights,
+    # NOT evidence that any component can predict future hashes.
+    prior={'binomial':0.25,'structure17':0.20,'relation':0.15,'short':0.12,
+           'long':0.08,'transition':0.08,'omission':0.06,'hash_context':0.06}
+    # Verified paired lift can add a limited bonus. Poor or unverified models
+    # keep their small exploratory prior rather than masquerading as proven.
+    raww=dict(prior)
     for n in parts:
-        st=perf.get(n,{}) ; nn=int(st.get('n') or 0)
-        t1=(st.get('top1') or 0); t3=(st.get('top3') or 0)
-        # Beta-like shrinkage toward chance/base-neutral performance.
-        r1=(t1+12*0.125)/(nn+12) if nn else 0.125
-        r3=(t3+12*0.375)/(nn+12) if nn else 0.375
-        evidence=min(1.0,nn/120.0)
-        raww[n]=0.35 + evidence*(2.8*r1 + 0.7*r3)
+        if n=='binomial': continue
+        st=perf.get(n,{})
+        nn=int(st.get('n') or 0)
+        lift=float(st.get('pairedLift') or 0)
+        se=float(st.get('pairedSE') or 0)
+        if nn>=100:
+            raww[n]+=min(0.15,max(0.0,(lift-1.64*se)/100.0)*2.0)
     sw=sum(raww.values()) or 1.0
     weights={n:raww[n]/sw for n in raww}
     score={i:sum(weights[n]*parts[n][i] for n in weights) for i in range(8)}
     order=_candidate_rank(score)
 
-    # Evidence flag is descriptive, not a guarantee: compare candidate OOS Top1
-    # with the strongest simple reference observed so far.
+    # Descriptive paired evidence only; selecting the best of several candidates
+    # still makes these labels exploratory rather than a predictive guarantee.
     complex_names=['long','short','structure17','transition','omission','hash_context','relation']
-    tested=[perf[n] for n in complex_names if perf.get(n,{}).get('n',0)>=30]
+    tested=[perf[n] for n in complex_names if perf.get(n,{}).get('n',0)>=100]
     baseline_perf=perf.get('binomial',{})
     best_complex=max((x.get('top1Rate') or 0 for x in tested),default=0)
     base_rate=baseline_perf.get('top1Rate') or 0
     edge='NO_EDGE'
-    if tested and best_complex >= base_rate + 2.0: edge='WEAK_EDGE'
-    if tested and best_complex >= base_rate + 5.0: edge='EVIDENCE'
+    if any((x.get('pairedLift') or 0)>1.64*(x.get('pairedSE') or 0) for x in tested): edge='WEAK_EDGE'
+    if any(x['n']>=200 and (x.get('pairedLift') or 0)>2.58*(x.get('pairedSE') or 0) for x in tested): edge='EVIDENCE'
     sep=max(0.0,score[order[0]]-score[order[1]])
     confidence=max(0.0,min(100.0,sep*800.0))
     return {'single':order[0],'top3':order[:3],
             'scores':{str(i):round(score[i]*100,3) for i in range(8)},
             'confidence':round(confidence,1),'weights':weights,'components':parts,
-            'research':{'mode':'rolling_oos','window':500,'performance':perf,
+            'research':{'mode':'exploratory_with_paired_oos','window':500,'performance':perf,
                         'edgeStatus':edge,'bestComplexTop1':round(best_complex,2),
-                        'baselineTop1':round(base_rate,2)}}
+                        'baselineTop1':round(base_rate,2),'weightMode':'exploratory_prior_plus_verified_bonus'}}
 
 def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None, force_backend=False):
     """Lock a pre-result prediction.
@@ -2132,18 +2155,27 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT * FROM ai_predictions WHERE period_key=%s",(key,)); row=cur.fetchone()
-                cur.execute("""SELECT ai_analysis,prediction_top3,actual_single,ensemble_detail FROM ai_predictions
-                    WHERE actual_single IS NOT NULL ORDER BY period_date DESC,period_no DESC LIMIT 500""")
+                cur.execute("""SELECT p.ai_analysis,p.prediction_top3,p.actual_single,p.ensemble_detail
+                    FROM ai_predictions p JOIN tron_blocks b ON b.block_number=p.target_block
+                    WHERE p.actual_single IS NOT NULL AND p.model_version LIKE 'v9.%%'
+                      AND p.locked_at IS NOT NULL AND b.block_time IS NOT NULL
+                      AND p.locked_at < b.block_time
+                    ORDER BY p.period_date DESC,p.period_no DESC LIMIT 500""")
                 verified_rows=cur.fetchall()
                 cur.execute("""SELECT COUNT(*) FILTER (WHERE actual_single IS NOT NULL) verified,
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND ai_analysis=actual_single) ai_hits,
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND prediction_top3 @> to_jsonb(ARRAY[actual_single])) top3_hits,
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND data_conclusion IS NOT NULL) data_verified,
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND data_conclusion=actual_single) data_hits
-                    FROM ai_predictions"""); agg=cur.fetchone()
-                cur.execute("""SELECT period_no, prediction_top3, actual_single FROM ai_predictions
-                    WHERE actual_single IS NOT NULL AND prediction_top3 IS NOT NULL
-                    ORDER BY verified_at DESC NULLS LAST, period_date DESC, period_no DESC LIMIT 1""")
+                    FROM ai_predictions p JOIN tron_blocks b ON b.block_number=p.target_block
+                    WHERE p.model_version LIKE 'v9.%%' AND p.locked_at IS NOT NULL
+                      AND b.block_time IS NOT NULL AND p.locked_at < b.block_time"""); agg=cur.fetchone()
+                cur.execute("""SELECT p.period_no,p.prediction_top3,p.actual_single
+                    FROM ai_predictions p JOIN tron_blocks b ON b.block_number=p.target_block
+                    WHERE p.actual_single IS NOT NULL AND p.prediction_top3 IS NOT NULL
+                      AND p.model_version LIKE 'v9.%%' AND p.locked_at IS NOT NULL
+                      AND b.block_time IS NOT NULL AND p.locked_at < b.block_time
+                    ORDER BY p.verified_at DESC NULLS LAST,p.period_date DESC,p.period_no DESC LIMIT 1""")
                 latest_verified=cur.fetchone()
         finally: db_release(conn)
     historical=get_historical_official_singles(date_str,period)
@@ -2221,10 +2253,12 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
                                'weight':round(float(weights.get(name,0))*100,1),'sample':int(st.get('n') or 0),
                                'top1Rate':st.get('top1Rate'),'top3Rate':st.get('top3Rate')})
     research=ensemble_detail.get('research') or {}
+    if (row or pending) and isinstance(ensemble_detail.get('scores'),dict):
+        scores=ensemble_detail['scores']
     decision={'edgeStatus':research.get('edgeStatus','NO_EDGE'),'confidence':ensemble_detail.get('confidence'),
               'components':component_view,'windows':{str(k):v for k,v in windows.items()},
               'baselineTop1':research.get('baselineTop1'),'bestComplexTop1':research.get('bestComplexTop1'),
-              'note':'只使用开奖前可见数据；哈希结构只作为统计特征，必须经样本外验证后才获得权重。'}
+              'note':'综合排序含固定的探索性权重；Top3百分比是相对模型分数，并非实际命中概率。经同批样本验证优于基础分布的模型才获得额外权重；仅统计开奖前锁定记录。'}
     result={'single':ai_single,'scores':scores,'historicalSample':len(historical),
             'frozen':bool(row or pending),'period':int(row['period_no']) if row else int(period),
             'top3':display_top3,'verifiedSample':verified,'hits':hits,

@@ -28,7 +28,7 @@
       </section>
 
       <section class="card ai-home-card v91-ai-card">
-        <div class="section-title">V9.1 多维AI决策中心</div>
+        <div class="section-title">V9.3 多维AI决策中心</div>
         <div class="ai-hero">
           <div><small>最终综合结论</small><strong id="aiFinalDecision">分析中</strong><span id="aiEdgeStatus">等待17组数据</span></div>
           <div class="ai-top3-big" id="aiTop3">Top3：等待数据</div>
@@ -41,7 +41,7 @@
         </div>
         <div class="ai-result-box" id="aiVerifyResult">预测验证：等待已开奖预测</div>
         <div class="ai-relation-line" id="relationTop3">历史高关联组次：等待数据</div>
-        <div class="ai-research-note" id="aiResearchNote">哈希、17组、遗漏、转移、长短期与位置关联均需通过样本外验证后才进入最终权重。</div>
+        <div class="ai-research-note" id="aiResearchNote">综合排序使用固定探索性权重；样本外优势只用于追加权重，不能保证下一期结果。</div>
         <div id="statsConclusion" hidden></div><div id="aiAnalysisLine" hidden></div><div id="aiAccuracy" hidden></div>
       </section>
 
@@ -221,17 +221,17 @@
     var lockedTop=Array.isArray(ai.top3)?ai.top3:[];
     var topParts=[];
     if(ai.frozen && lockedTop.length){
-      for(var ti=0;ti<Math.min(3,lockedTop.length);ti++) topParts.push((ti+1)+'. 单'+lockedTop[ti]);
+      for(var ti=0;ti<Math.min(3,lockedTop.length);ti++) topParts.push((ti+1)+'. 单'+lockedTop[ti]+' '+Number(scoreMap[String(lockedTop[ti])]||0).toFixed(2)+'%');
     }else{
       for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
     }
     text('aiTop3',topParts.length?'Top3：'+topParts.join('　'):'Top3：正在分析中…');
     var dec=ai.decision||{}, edge=String(dec.edgeStatus||'NO_EDGE');
-    var edgeCN=edge==='EVIDENCE'?'统计证据较强':(edge==='WEAK_EDGE'?'存在弱优势':'暂无统计优势');
+    var edgeCN=edge==='EVIDENCE'?'探索性统计信号较强':(edge==='WEAK_EDGE'?'探索性弱信号':'探索性排序 · 暂无验证优势');
     text('aiFinalDecision',(ai.frozen&&aiSingle!==null)?('单'+aiSingle):(c17Exact?'等待正式锁定':'分析中'));
-    text('aiEdgeStatus',edgeCN+(dec.confidence!=null?' · 一致度 '+Number(dec.confidence).toFixed(1)+'%':''));
+    text('aiEdgeStatus',edgeCN);
     var comps=Array.isArray(dec.components)?dec.components:[], mh='';
-    for(var mi=0;mi<comps.length;mi++){var mc=comps[mi], ms=(mc.single===0||mc.single)?('单'+mc.single):'--', rr=mc.top1Rate!=null?Number(mc.top1Rate).toFixed(1)+'%':'积累中'; mh+='<div class=\"ai-model-item\"><b>'+mc.label+'</b><strong>'+ms+'</strong><small>权重 '+Number(mc.weight||0).toFixed(1)+'% · OOS '+rr+'</small></div>';}
+    for(var mi=0;mi<comps.length;mi++){var mc=comps[mi], ms=(mc.single===0||mc.single)?('单'+mc.single):'--', rr=mc.top1Rate!=null?Number(mc.top1Rate).toFixed(1)+'% / '+Number(mc.sample||0)+'期':'积累中'; mh+='<div class=\"ai-model-item\"><b>'+mc.label+'</b><strong>'+ms+'</strong><small>权重 '+Number(mc.weight||0).toFixed(1)+'% · OOS '+rr+'</small></div>';}
     if(mh)document.getElementById('aiModelGrid').innerHTML=mh;
     var ww=dec.windows||{}, w20=ww['20']||{},w100=ww['100']||{},w500=ww['500']||{};
     function wr(v){return v&&v.n?(v.hit+'/'+v.n+' · '+Number(v.top1Rate||0).toFixed(1)+'%'):'样本积累中';}
