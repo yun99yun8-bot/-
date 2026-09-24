@@ -28,6 +28,9 @@
           <div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
         </div>
         <div class="conclusion" id="statsConclusion">结论：等待第1～18组数据</div>
+        <div class="conclusion ai-conclusion" id="aiConclusion">AI分析：等待数据</div>
+        <div class="stats-note" id="aiAccuracy">AI历史验证：暂无已验证样本</div>
+        <div class="stats-note" id="group20Matches">与第20组相同：等待第20组</div>
       </section>
 
       <section class="card hero-card">
@@ -123,6 +126,12 @@
     var sample=Number(ds.sampleSize||0), highest=Array.isArray(ds.highest)?ds.highest:[], names=[];
     for(var j=0;j<highest.length;j++)names.push('单'+highest[j].single);
     text('statsConclusion',highest.length?'结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）':'结论：等待第1～18组数据');
+    var ai=data.aiAnalysis||{};
+    text('aiConclusion',ai.single!=null?'AI分析：单'+ai.single+'（历史统计倾向）':'AI分析：等待数据');
+    var rate=ai.hitRate!=null?Number(ai.hitRate).toFixed(2)+'%':'--';
+    text('aiAccuracy','AI历史验证：'+Number(ai.hits||0)+'/'+Number(ai.verifiedSample||0)+'（'+rate+'）');
+    var same=Array.isArray(ai.sameAsGroup20)?ai.sameAsGroup20:[];
+    text('group20Matches',same.length?'与第20组相同：第'+same.join('、第')+'组':'与第20组相同：'+(data.officialReady?'前19组无相同单数结果':'等待第20组'));
   }
   var groupSeenKeys={};
   var groupHighlightUntil={};

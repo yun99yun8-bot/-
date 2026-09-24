@@ -248,6 +248,21 @@ def init_db():
                     )
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_tron_blocks_fetched_at ON tron_blocks(fetched_at DESC)")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ai_predictions (
+                        period_key TEXT PRIMARY KEY,
+                        period_date DATE NOT NULL,
+                        period_no INTEGER NOT NULL,
+                        target_block BIGINT NOT NULL,
+                        data_conclusion SMALLINT,
+                        ai_analysis SMALLINT NOT NULL,
+                        sample_size SMALLINT NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        actual_single SMALLINT,
+                        verified_at TIMESTAMPTZ
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_predictions_date ON ai_predictions(period_date DESC, period_no DESC)")
         return True
     finally:
         db_release(conn)
@@ -516,6 +531,129 @@ def stats_from_groups(groups):
     return {'sampleSize': used, 'stats': stats, 'highest': highest}
 
 
+
+def get_historical_official_singles(date_str, period, limit=720):
+    """Return prior official group-20 single counts from retained DB history."""
+    target_now = period_target_block(date_str, period)
+    conn = db_connect()
+    if conn is None:
+        return []
+    try:
+        with conn.cursor() as cur:
+            # Official result blocks follow the platform's 20-block cadence.
+            cur.execute("""
+                SELECT single_count FROM tron_blocks
+                WHERE block_number < %s AND MOD((%s - block_number), 20) = 0
+                ORDER BY block_number DESC LIMIT %s
+            """, (target_now, target_now, int(limit)))
+            return [int(r[0]) for r in cur.fetchall()]
+    finally:
+        db_release(conn)
+
+
+def ai_analysis_from_data(groups, historical):
+    """Deterministic statistical tendency, not a guarantee/prediction.
+
+    Score = 55% current groups 1-18 frequency + 35% retained historical
+    official frequency + 10% recent omission tendency. Ties use the lower
+    single-count only as a stable deterministic tie-breaker.
+    """
+    current = [int(groups[str(i)]['singleCount']) for i in range(1,19)
+               if str(i) in groups and groups[str(i)].get('singleCount') is not None]
+    if not current:
+        return None, {}
+    hc={i:0 for i in range(8)}; cc={i:0 for i in range(8)}
+    for x in current: cc[x]+=1
+    for x in historical:
+        if 0 <= int(x) <= 7: hc[int(x)]+=1
+    recent=list(historical[:40])
+    omission={i:0 for i in range(8)}
+    for i in range(8):
+        n=0
+        for x in recent:
+            if x==i: break
+            n+=1
+        omission[i]=n
+    max_omit=max(omission.values()) if omission else 0
+    scores={}
+    for i in range(8):
+        cur=cc[i]/len(current) if current else 0
+        hist=hc[i]/len(historical) if historical else 0
+        omit=omission[i]/max_omit if max_omit else 0
+        scores[i]=0.55*cur+0.35*hist+0.10*omit
+    pick=max(range(8), key=lambda i:(scores[i],-i))
+    return pick, {str(i):round(scores[i]*100,2) for i in range(8)}
+
+
+def save_prediction_if_ready(date_str, period, groups, target20):
+    stats=stats_from_groups(groups)
+    if stats.get('sampleSize') != 18 or groups.get('20'):
+        return None
+    historical=get_historical_official_singles(date_str, period)
+    ai, scores=ai_analysis_from_data(groups,historical)
+    if ai is None: return None
+    highest=stats.get('highest') or []
+    # A tied data conclusion is not forced into a false single choice.
+    data_conclusion=int(highest[0]['single']) if len(highest)==1 else None
+    key=f'{date_str}:{int(period):04d}'
+    conn=db_connect()
+    if conn is None: return None
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,sample_size)
+                    VALUES(%s,%s,%s,%s,%s,%s,18)
+                    ON CONFLICT(period_key) DO NOTHING
+                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai)))
+    finally: db_release(conn)
+    return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True}
+
+
+def verify_prediction(date_str, period, official):
+    if not official: return
+    key=f'{date_str}:{int(period):04d}'
+    conn=db_connect()
+    if conn is None:return
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""UPDATE ai_predictions SET actual_single=%s,verified_at=COALESCE(verified_at,NOW())
+                               WHERE period_key=%s AND actual_single IS NULL""",
+                            (int(official['singleCount']),key))
+    finally: db_release(conn)
+
+
+def prediction_summary(date_str, period, groups, target20, official):
+    key=f'{date_str}:{int(period):04d}'
+    if official: verify_prediction(date_str,period,official)
+    else: save_prediction_if_ready(date_str,period,groups,target20)
+    conn=db_connect(); row=None; agg=None
+    if conn is not None:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM ai_predictions WHERE period_key=%s",(key,)); row=cur.fetchone()
+                cur.execute("""SELECT COUNT(*) FILTER (WHERE actual_single IS NOT NULL) verified,
+                    COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND ai_analysis=actual_single) ai_hits,
+                    COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND data_conclusion IS NOT NULL) data_verified,
+                    COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND data_conclusion=actual_single) data_hits
+                    FROM ai_predictions"""); agg=cur.fetchone()
+        finally: db_release(conn)
+    historical=get_historical_official_singles(date_str,period)
+    live_ai,scores=ai_analysis_from_data(groups,historical)
+    ai_single=int(row['ai_analysis']) if row else live_ai
+    verified=int(agg['verified'] or 0) if agg else 0; hits=int(agg['ai_hits'] or 0) if agg else 0
+    dv=int(agg['data_verified'] or 0) if agg else 0; dh=int(agg['data_hits'] or 0) if agg else 0
+    matches=[]
+    if official:
+        actual=int(official['singleCount'])
+        matches=[i for i in range(1,20) if str(i) in groups and int(groups[str(i)].get('singleCount',-1))==actual]
+    return {'single':ai_single,'scores':scores,'historicalSample':len(historical),
+            'frozen':bool(row),'verifiedSample':verified,'hits':hits,
+            'hitRate':round(hits/verified*100,2) if verified else None,
+            'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,
+            'sameAsGroup20':matches}
+
 def read_state():
     try:
         if STATE_FILE.exists():
@@ -643,6 +781,7 @@ def draw():
         omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
         omission = {str(i): int(omission.get(str(i), 0) or 0) for i in range(8)}
         history = build_recent_official_history(date_str, period, 20)
+        ai_info = prediction_summary(date_str, period, groups, target20, official)
         payload = {
             **state, 'platformPeriod': platform_period, 'currentPeriod': period_str,
             'targetResultBlock': target20, 'officialReady': bool(official),
@@ -651,6 +790,7 @@ def draw():
             'resultBlockNumber': result_obj.get('blockNumber') if result_obj else None,
             'resultPlatformPeriod': result_obj.get('platformPeriod') if result_obj and result_obj.get('platformPeriod') else state.get('platformPeriod'),
             'result': result_obj, 'omission': omission, 'resultHistory': history,
+            'aiAnalysis': ai_info,
             'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
             'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
             'databaseStatus': 'connected', 'stale': False,

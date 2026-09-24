@@ -79,3 +79,4 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .group-table tbody tr{background:#fff;transition:background-color .35s ease,box-shadow .35s ease}
 .group-table tbody tr.new-group-row{background:#fff1b8;box-shadow:inset 4px 0 0 #f0a500}
 .group-table tbody tr.new-group-row td{font-weight:800}
+.ai-conclusion{margin-top:8px;font-weight:800}.stats-note#aiAccuracy,.stats-note#group20Matches{margin-top:6px}

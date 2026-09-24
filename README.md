@@ -31,3 +31,10 @@ DB stability update:
 - Retries transient connection acquisition failures.
 - /api/draw keeps the last successful payload in memory and returns it with databaseStatus=reconnecting instead of blanking the frontend during a short DB timeout.
 - Existing 3-day retention, TRON collector, calculation rules, and 5-second new-group highlight are unchanged.
+
+AI statistical analysis module:
+- Adds AI分析 next to the current statistical conclusion.
+- Uses a deterministic weighted statistical model over current groups 1-18 and retained historical official results; it is a statistical tendency, not a guaranteed prediction.
+- Freezes each prediction before group 20 is available and verifies it after group 20, so hit-rate tracking is not rewritten after the outcome.
+- Shows which groups 1-19 have the same 单X result as group 20.
+- Accuracy begins accumulating after this version is deployed; prior periods are used as historical features but are not falsely counted as pre-outcome predictions.
