@@ -286,13 +286,24 @@ def state():
     chain=latest.get("chain_block"); progress=current_position(target,chain)
     pred=kp["prediction"] if kp else (king_prediction(day,idx,period,get_minute_blocks(day,idx,17)) if progress>=17 else None)
     actual=kp["actual"] if kp else None
+    current_rows=get_minute_blocks(day,idx,20)
+    actual_numbers=None
+    actual_odd=None
+    actual_even=None
+    actual_block=None
+    actual_hash=None
+    if len(current_rows)>=20:
+        r20=current_rows[19]
+        actual_numbers=list(map(int,r20["numbers"].split(",")))
+        actual_odd=int(r20["odd"]); actual_even=int(r20["even"])
+        actual_block=int(r20["block"]); actual_hash=r20["hash"]
     recent60=all_rows[-60:]
     single_counts={str(i):sum(1 for r in recent60 if int(r["odd"])==i) for i in range(1,8)}
     combo_counts=Counter(f"{r['odd']}单{r['even']}双" for r in recent60)
     histpred=historical_prediction(all_rows,period)
     latest_copy=dict(latest); latest_copy.update({"target_block":target,"chain_block":chain,"progress":progress})
     return {"latest":latest_copy,"day":day,"current_time":day,"period_index":idx,"display_period":f"{idx:04d}",
-            "progress":progress,"prediction":pred,"actual":actual,"prediction_period":period,
+            "progress":progress,"prediction":pred,"actual":actual,"actual_numbers":actual_numbers,"actual_odd":actual_odd,"actual_even":actual_even,"actual_block":actual_block,"actual_hash":actual_hash,"prediction_period":period,
             "prediction_total":int(done["n"] or 0),"hits":int(done["h"] or 0),"misses":int(done["n"] or 0)-int(done["h"] or 0),
             "hit_rate":round(int(done["h"] or 0)*100/int(done["n"]),1) if int(done["n"] or 0) else 0,
             "single_counts":single_counts,"combo_counts":dict(combo_counts.most_common()),
@@ -361,9 +372,10 @@ th,td{padding:5px 2px;border-bottom:1px solid #eee;text-align:left;vertical-alig
 <div class="label">第17组统计预判第20组</div>
 <div class="status" id="pred">等待第17组</div>
 
-<div class="label">第20组实际结果</div>
+<div class="label">第20组实际开奖结果</div>
 <div class="status" id="actual">等待第20组</div>
 
+<div class="label">第20组出的7个号码</div>
 <div class="nums" id="nums">-</div>
 <div id="parity"></div>
 <div class="hash" id="hash"></div>
@@ -451,18 +463,16 @@ async function refresh(){
   document.getElementById('chain').textContent=l.chain_block||'-';
 
   document.getElementById('pred').textContent=d.prediction ? ('预判期：'+d.display_period+'期｜'+d.prediction) : '等待17/20预判';
-  document.getElementById('actual').textContent=d.actual ? ('开奖期：'+d.display_period+'期｜'+d.actual) : '等待20/20开奖';
+  document.getElementById('actual').textContent=d.actual ? ('开奖期：'+d.display_period+'期｜第20组：'+d.actual) : '等待20/20开奖';
   document.getElementById('status').textContent=d.actual?'已开奖':'等待中';
 
-  document.getElementById('nums').textContent=
-   (l.numbers||[]).map(x=>String(x).padStart(2,'0')).join('、')||'-';
+  const actualNums=d.actual_numbers||[];
+  document.getElementById('nums').textContent=actualNums.map(x=>String(x).padStart(2,'0')).join('、')||'-';
 
-  document.getElementById('parity').innerHTML=l.numbers
-   ? '<span class="badge">'+l.odd+'单'+l.even+'双</span>'+
-     '<span class="badge">尾数'+l.tail_odd+'单'+l.tail_even+'双</span>'
-   : '';
+  document.getElementById('parity').innerHTML=d.actual ?
+   '<span class="badge">'+d.actual_odd+'单'+d.actual_even+'双</span>' : '';
 
-  document.getElementById('hash').textContent=l.hash||'';
+  document.getElementById('hash').textContent=d.actual_hash||'';
 
   document.getElementById('total').textContent=d.prediction_total;
   document.getElementById('hits').textContent=d.hits;
