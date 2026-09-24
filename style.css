@@ -134,3 +134,20 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 
 /* Home reliability/status refinements */
 .home-live-status{font-size:12px;color:#64748b;margin-top:4px;font-weight:600}.home-live-status.ready{color:#16803c}.home-live-status.warn{color:#b45309}.home-dashboard .card{overflow:hidden}.home-recent20 .history20-grid{margin-top:10px}
+
+/* 2026-09 home mobile cleanup: recent 20 fixed 5 x 4, no horizontal scrolling */
+.home-dashboard{width:100%;max-width:760px;margin:0 auto;padding-left:max(10px,env(safe-area-inset-left));padding-right:max(10px,env(safe-area-inset-right));box-sizing:border-box}
+.home-dashboard .card{width:100%;box-sizing:border-box}
+.home-recent20 .history20-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;overflow:visible;padding:0;margin-top:10px;width:100%}
+.home-recent20 .history20-item{min-width:0;width:100%;min-height:54px;box-sizing:border-box;border-radius:9px;padding:5px 2px;overflow:hidden}
+.home-recent20 .history20-item strong{font-size:clamp(9px,2.7vw,12px);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.home-recent20 .history20-item small{font-size:clamp(12px,3.4vw,15px);white-space:nowrap}
+@media(max-width:420px){
+  .home-dashboard{padding-left:8px;padding-right:8px}
+  .home-dashboard .card{padding-left:10px;padding-right:10px}
+  .home-recent20 .history20-grid{gap:4px}
+  .home-recent20 .history20-item{min-height:50px;border-radius:8px;padding:4px 1px}
+  .result-grid{gap:5px}
+  .result-box{min-width:0}
+  .ai-home-card .conclusion,.ai-home-card .ai-result-box,.ai-home-card .ai-predict-line,.ai-home-card .ai-relation-line{overflow-wrap:anywhere}
+}
