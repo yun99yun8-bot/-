@@ -11,6 +11,7 @@ TRON_NOWBLOCK = 'https://api.trongrid.io/wallet/getnowblock'
 
 # Platform period: 0001-1440, one period per minute, reset daily.
 CN_TZ = timezone(timedelta(hours=8))
+STATE_FILE = BASE_DIR / 'draw_state.json'
 
 
 def current_period():
@@ -44,7 +45,7 @@ def calc_numbers(block_hash):
     result = []
     # There can be more than 7 source candidates because invalid/duplicate pairs shift.
     while len(result) < 7 and li < len(letters) and di < len(digits):
-        value = int(letters[li], 16) * 10 + int(digits[di])
+        value = 'ABCDE'.index(letters[li]) * 10 + int(digits[di])
         li += 1
         di += 1
         if value == 0:
@@ -60,6 +61,21 @@ def calc_numbers(block_hash):
     return result
 
 
+def read_state():
+    try:
+        if STATE_FILE.exists():
+            return json.loads(STATE_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+    return None
+
+
+def write_state(data):
+    tmp = STATE_FILE.with_suffix('.tmp')
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
+    tmp.replace(STATE_FILE)
+
+
 @app.get('/')
 def index():
     return Response((BASE_DIR / 'index.html').read_text(encoding='utf-8'), mimetype='text/html; charset=utf-8')
@@ -70,20 +86,33 @@ def style():
 
 @app.get('/api/draw')
 def draw():
+    date_str, period = current_period()
+    period_str = f'{period:04d}'
+    state = read_state()
+
+    # Same period: keep the already published result stable.
+    if state and state.get('date') == date_str and state.get('period') == period_str:
+        return jsonify({**state, 'ok': True, 'isNew': False})
+
+    # A new period has started. Try to obtain its result. Until a new result
+    # is successfully obtained, keep returning the previous published result
+    # instead of clearing the UI to '--'.
     try:
-        date_str, period = current_period()
         latest = fetch_latest_block()
         numbers = calc_numbers(latest['block'])
-        return jsonify({
-            'ok': True,
+        new_state = {
             'date': date_str,
-            'period': f'{period:04d}',
+            'period': period_str,
             'block': latest['block'],
             'blockNumber': latest['number'],
             'numbers': [f'{n:02d}' for n in numbers],
             'source': 'TRON latest block',
-        })
+        }
+        write_state(new_state)
+        return jsonify({**new_state, 'ok': True, 'isNew': True})
     except Exception as exc:
+        if state:
+            return jsonify({**state, 'ok': True, 'isNew': False, 'waitingForNewResult': True, 'error': str(exc)})
         return jsonify({'ok': False, 'error': str(exc)}), 502
 
 if __name__ == '__main__':
