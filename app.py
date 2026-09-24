@@ -14,6 +14,8 @@ TRON_BLOCK_BY_NUM = f'{TRON_API}/getblockbynum'
 TRON_SOLIDITY_API = 'https://api.trongrid.io/walletsolidity'
 TRON_SOLIDITY_NOWBLOCK = f'{TRON_SOLIDITY_API}/getnowblock'
 TRON_SOLIDITY_BLOCK_BY_NUM = f'{TRON_SOLIDITY_API}/getblockbynum'
+TRONSCAN_BLOCK = 'https://apilist.tronscan.org/api/block'
+TRONSCAN_LATEST = 'https://apilist.tronscan.org/api/block/latest'
 
 CN_TZ = timezone(timedelta(hours=8))
 STATE_FILE = BASE_DIR / 'draw_state.json'
@@ -59,8 +61,17 @@ def fetch_latest_block():
             errors.append(url + ': invalid response')
         except Exception as e:
             errors.append(url + ': ' + str(e))
+    try:
+        data = _get_json(TRONSCAN_LATEST)
+        row = (data.get('data') or [None])[0] if isinstance(data, dict) else None
+        if row and row.get('hash') and row.get('number') is not None:
+            return {'block': row['hash'], 'number': int(row['number']), 'timestamp': row.get('timestamp')}
+        if isinstance(data, dict) and data.get('number') is not None and data.get('hash'):
+            return {'block': data['hash'], 'number': int(data['number']), 'timestamp': data.get('timestamp')}
+        errors.append(TRONSCAN_LATEST + ': invalid response')
+    except Exception as e:
+        errors.append(TRONSCAN_LATEST + ': ' + str(e))
     raise RuntimeError('TRON 最新区块接口不可用；' + ' | '.join(errors))
-
 
 def fetch_block_by_number(number):
     errors = []
@@ -78,8 +89,16 @@ def fetch_block_by_number(number):
             errors.append(url + ': block not found')
         except Exception as e:
             errors.append(url + ': ' + str(e))
+    try:
+        data = _get_json(f'{TRONSCAN_BLOCK}?number={int(number)}')
+        rows = data.get('data') if isinstance(data, dict) else None
+        row = rows[0] if isinstance(rows, list) and rows else None
+        if row and row.get('hash'):
+            return {'block': row['hash'], 'number': int(row.get('number', number)), 'timestamp': row.get('timestamp')}
+        errors.append('TRONScan: block not found')
+    except Exception as e:
+        errors.append('TRONScan: ' + str(e))
     raise RuntimeError(f'目标区块 {number} 尚未可读取；' + ' | '.join(errors))
-
 
 def calc_numbers(block_hash):
     """Platform rule: read the hash from right to left.
