@@ -13,21 +13,23 @@
       <button id="historyTab">历史数据</button>
     </nav>
 
-    <main class="content" id="tornContent">
-      <section class="card stats-card">
-        <div class="section-title">数据统计</div>
-        <div class="stats-note">按当前期第1～18组区块数据统计</div>
-        <div class="prob-grid" id="probGrid">
-          <div class="prob-item" data-prob-single="3">单3<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-prob-single="4">单4<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-prob-single="5">单5<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-prob-single="2">单2<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-prob-single="0">单0<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-prob-single="7">单7<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-prob-single="1">单1<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
+    <main class="content home-dashboard" id="tornContent">
+      <section class="card hero-card">
+        <div class="result-head">
+          <div class="section-title result-title-line">开奖结果 <span class="countdown" id="countdown">--</span></div>
+          <div class="draw-meta">
+            <span class="single-badge">单<strong id="singleValue">--</strong></span>
+            <span class="period-badge">第 <strong id="periodValue">0000000000</strong> 期<br><small>区块：<span id="blockValue">--</span></small></span>
+          </div>
         </div>
-        <div class="conclusion" id="statsConclusion">数据结论：等待第1～18组数据</div>
+        <div class="result-grid" aria-label="七个开奖结果">
+          <div class="result-box" data-result="0">--</div><div class="result-box" data-result="1">--</div><div class="result-box" data-result="2">--</div><div class="result-box" data-result="3">--</div><div class="result-box" data-result="4">--</div><div class="result-box" data-result="5">--</div><div class="result-box" data-result="6">--</div>
+        </div>
+      </section>
+
+      <section class="card ai-home-card">
+        <div class="section-title">AI分析结论</div>
+        <div class="conclusion primary-conclusion" id="statsConclusion">AI结论：正在收集前17组数据</div>
         <div class="conclusion" id="aiAnalysisLine">AI分析：正在分析中…</div>
         <div class="ai-panel">
           <div class="ai-result-box" id="aiVerifyResult">预测验证：等待已开奖预测</div>
@@ -40,72 +42,35 @@
         <div class="stats-note" id="group20Matches">与第20组相同：等待第20组</div>
       </section>
 
-      <section class="card hero-card">
-        <div class="result-head">
-          <div class="section-title result-title-line">开奖结果 <span class="countdown" id="countdown">--</span></div>
-          <div class="draw-meta">
-            <span class="single-badge">单<strong id="singleValue">--</strong></span>
-            <span class="period-badge">第 <strong id="periodValue">0000000000</strong> 期<br><small>区块：<span id="blockValue">--</span></small></span>
-          </div>
-        </div>
-        <div class="result-grid" aria-label="七个开奖结果">
-          <div class="result-box" data-result="0">--</div>
-          <div class="result-box" data-result="1">--</div>
-          <div class="result-box" data-result="2">--</div>
-          <div class="result-box" data-result="3">--</div>
-          <div class="result-box" data-result="4">--</div>
-          <div class="result-box" data-result="5">--</div>
-          <div class="result-box" data-result="6">--</div>
-        </div>
-      </section>
-
-      <section class="card result-history-card">
-        <div class="section-title">往期20期数据</div>
-        <div class="history20-note">只记录已经确认开奖的往期数据</div>
-        <div class="history20-grid" id="resultHistory20">
-          <div class="history20-item waiting">等待数据</div>
-        </div>
-      </section>
-
-      <section class="card">
+      <section class="card omission-card">
         <div class="section-title">遗漏统计</div>
         <div class="omission-grid">
-          <div class="stat" data-single="0">单0<small>--期</small></div>
-          <div class="stat" data-single="1">单1<small>--期</small></div>
-          <div class="stat" data-single="2">单2<small>--期</small></div>
-          <div class="stat" data-single="3">单3<small>--期</small></div>
-          <div class="stat" data-single="4">单4<small>--期</small></div>
-          <div class="stat" data-single="5">单5<small>--期</small></div>
-          <div class="stat" data-single="6">单6<small>--期</small></div>
-          <div class="stat" data-single="7">单7<small>--期</small></div>
-        </div>
-      </section>
-
-      <section class="card">
-        <div class="section-title">20组区块数据</div>
-        <div class="group-table-wrap">
-          <table class="group-table">
-            <thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead>
-            <tbody id="groupTableBody"><tr><td colspan="4">等待数据</td></tr></tbody>
-          </table>
+          <div class="stat" data-single="0">单0<small>--期</small></div><div class="stat" data-single="1">单1<small>--期</small></div><div class="stat" data-single="2">单2<small>--期</small></div><div class="stat" data-single="3">单3<small>--期</small></div><div class="stat" data-single="4">单4<small>--期</small></div><div class="stat" data-single="5">单5<small>--期</small></div><div class="stat" data-single="6">单6<small>--期</small></div><div class="stat" data-single="7">单7<small>--期</small></div>
         </div>
       </section>
     </main>
+
     <main class="content" id="historyContent" hidden>
       <section class="card history-section">
-        <div class="section-title">一、模仿预测</div>
-        <div class="placeholder" id="historyModel">正在读取历史模型数据…</div>
+        <div class="section-title">一、当前期1～18组统计</div>
+        <div class="stats-note">原首页统计移到历史数据页，仅作为描述性统计，不等同于预测。</div>
+        <div class="prob-grid" id="probGrid">
+          <div class="prob-item" data-prob-single="3">单3<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="4">单4<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="5">单5<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="2">单2<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="0">单0<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="7">单7<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="1">单1<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
+        </div>
       </section>
-
       <section class="card history-section">
-        <div class="section-title">二、历史开奖记录</div>
-        <div class="placeholder table-placeholder" id="historyDraws">正在读取历史开奖记录…</div>
+        <div class="section-title">二、本期20组区块数据</div>
+        <div class="history20-note">固定显示第1～20组；未取得的组显示等待数据。</div>
+        <div class="group-table-wrap"><table class="group-table"><thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead><tbody id="groupTableBody"><tr><td colspan="4">等待数据</td></tr></tbody></table></div>
       </section>
-
       <section class="card history-section">
-        <div class="section-title">三、历史预判记录</div>
-        <div class="placeholder table-placeholder" id="historyPredictions">正在读取历史预判记录…</div>
+        <div class="section-title">三、最近20期正式结果</div>
+        <div class="history20-grid" id="resultHistory20"><div class="history20-item waiting">等待数据</div></div>
       </section>
+      <section class="card history-section"><div class="section-title">四、历史AI验证</div><div class="placeholder" id="historyModel">正在读取历史模型数据…</div></section>
+      <section class="card history-section"><div class="section-title">五、历史开奖记录</div><div class="placeholder table-placeholder" id="historyDraws">正在读取历史开奖记录…</div></section>
+      <section class="card history-section"><div class="section-title">六、历史预判记录</div><div class="placeholder table-placeholder" id="historyPredictions">正在读取历史预判记录…</div></section>
+      <section class="card history-section"><div class="section-title">七、AI规律库（滚动1000期）</div><div class="placeholder table-placeholder" id="patternInsights">正在读取遗漏卡期、长期分布和哈希结构…</div></section>
     </main>
   </div>
 <script>
@@ -119,17 +84,17 @@
     else{historyTab.classList.add('active');tornTab.classList.remove('active');historyContent.hidden=false;tornContent.hidden=true;}
   }
   tornTab.onclick=function(){selectTab(true);};
-  historyTab.onclick=function(){selectTab(false);};
+  historyTab.onclick=function(){selectTab(false);loadHistoryPage();};
 
   function text(id,value){var el=document.getElementById(id);if(el)el.textContent=(value===null||value===undefined||value==='')?'--':String(value);}
   var historyBusy=false;
   function loadHistoryPage(){
     if(historyBusy)return; historyBusy=true;
     var x=new XMLHttpRequest(); x.open('GET','/api/history-summary?t='+Date.now(),true);
-    x.onreadystatechange=function(){if(x.readyState!==4)return;historyBusy=false;if(x.status<200||x.status>=300)return;try{var d=JSON.parse(x.responseText);if(!d.ok)return;renderHistoryPage(d.rows||[]);}catch(e){}};
+    x.onreadystatechange=function(){if(x.readyState!==4)return;historyBusy=false;if(x.status<200||x.status>=300)return;try{var d=JSON.parse(x.responseText);if(!d.ok)return;renderHistoryPage(d.rows||[],d.patterns||null);}catch(e){}};
     x.onerror=function(){historyBusy=false;}; x.send(null);
   }
-  function renderHistoryPage(rows){
+  function renderHistoryPage(rows,patterns){
     var verified=rows.filter(function(r){return r.verified;}); var hits=verified.filter(function(r){return r.hit;}).length;
     text('historyModel','历史AI前三验证：'+hits+'/'+verified.length+(verified.length?'（'+(hits/verified.length*100).toFixed(2)+'%）':'')+'；仅统计开奖前已保存的预测。');
     var dh='<table class="group-table"><thead><tr><th>期号</th><th>正式单数</th><th>7个号码</th><th>区块</th></tr></thead><tbody>';
@@ -140,6 +105,18 @@
     }
     dh+='</tbody></table>'; ph+='</tbody></table>';
     document.getElementById('historyDraws').innerHTML=dh; document.getElementById('historyPredictions').innerHTML=ph;
+    var pe=document.getElementById('patternInsights');
+    if(pe && patterns){
+      var dist=patterns.distribution||[], hz=patterns.omissionHazard||{};
+      var hh='<div class="history20-note">已读取 '+Number(patterns.samplePeriods||0)+' / '+Number(patterns.requestedPeriods||1000)+' 期正式结果。条件率是历史统计，不是保证概率。</div>';
+      hh+='<table class="group-table"><thead><tr><th>类别</th><th>长期出现率</th><th>当前遗漏</th><th>当前遗漏区间历史率</th><th>历史高发遗漏点</th><th>样本</th></tr></thead><tbody>';
+      for(var pi=0;pi<8;pi++){var dd=dist[pi]||{}, h=hz[String(pi)]||{}; var band=Array.isArray(h.band)?h.band.join('~'):'--';
+        hh+='<tr><td>单'+pi+'</td><td>'+Number(dd.rate||0).toFixed(2)+'%</td><td>'+Number(h.currentOmission||0)+'</td><td>'+Number(h.conditionalRate||0).toFixed(2)+'%（'+band+'）</td><td>'+(h.bestOmission==null?'样本不足':('遗漏'+h.bestOmission+'：'+Number(h.bestRate||0).toFixed(2)+'%'))+'</td><td>'+Number(h.sample||0)+'</td></tr>';
+      }
+      hh+='</tbody></table>';
+      var hd=patterns.hashDiagnostics||{}; hh+='<div class="history20-note">哈希样本：'+Number(hd.sampleHashes||0)+'；A-E与数字字符分布已纳入偏差检测。'+(patterns.note||'')+'</div>';
+      pe.innerHTML=hh;
+    }
   }
   var currentCountdownValue=60;
   // UI last-good cache: transient empty API fields must never blank valid analysis.

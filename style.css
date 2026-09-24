@@ -101,3 +101,10 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 
 /* Fixed 20-group placeholders: keep the complete frame visible while data arrives. */
 #groupTableBody tr.waiting-row td { opacity: .58; }
+/* 1000期AI版布局整理：主页只保留开奖、AI结论/分析、遗漏；明细集中到历史数据 */
+.home-dashboard{max-width:980px;margin:0 auto}
+.ai-home-card .primary-conclusion{font-weight:800}
+.ai-home-card .ai-panel{margin-top:10px}
+.omission-card{margin-bottom:18px}
+#historyContent .history-section{margin-bottom:14px}
+#historyContent .group-table-wrap{max-height:620px;overflow:auto}

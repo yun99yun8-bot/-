@@ -845,6 +845,83 @@ def group20_relation_model(date_str, period, lookback=120):
         _relation_cache.update({'key':cache_key,'at':now,'value':value})
     return value
 
+
+
+def omission_hazard_model(hist):
+    """Empirical P(next official result == class | current omission length).
+
+    `hist` is newest -> oldest.  We estimate each class separately from prior
+    official results only.  Beta smoothing and a +/-2 omission band keep tiny
+    samples from dominating the model.  Returned values are evidence summaries,
+    not guaranteed probabilities.
+    """
+    seq=[int(x) for x in reversed(hist) if 0 <= int(x) <= 7]
+    out={}
+    base_counts=[seq.count(i) for i in range(8)]
+    n=max(1,len(seq))
+    for cls in range(8):
+        exposures={} ; hits={} ; omit=0
+        for actual in seq:
+            k=min(120,omit)
+            exposures[k]=exposures.get(k,0)+1
+            if actual==cls:
+                hits[k]=hits.get(k,0)+1
+                omit=0
+            else:
+                omit+=1
+        current=0
+        for x in hist:
+            if int(x)==cls: break
+            current+=1
+        lo=max(0,current-2); hi=min(120,current+2)
+        sample=sum(exposures.get(k,0) for k in range(lo,hi+1))
+        hit=sum(hits.get(k,0) for k in range(lo,hi+1))
+        base=(base_counts[cls]+1)/(n+8)
+        # Prior strength 12 periods centered on the class long-run rate.
+        prob=(hit+12*base)/(sample+12) if sample>=0 else base
+        lift=prob/base if base>0 else 1.0
+        zones=[]
+        for k,sm in exposures.items():
+            if sm < 5: continue
+            h=hits.get(k,0); pr=(h+8*base)/(sm+8); lf=pr/base if base else 1.0
+            zones.append((lf,sm,k,pr))
+        zones.sort(reverse=True)
+        best=zones[0] if zones else (1.0,0,None,base)
+        out[cls]={'currentOmission':current,'band':[lo,hi],'sample':sample,'hits':hit,
+                  'conditionalRate':round(prob*100,2),'baseRate':round(base*100,2),
+                  'lift':round(lift,3),'bestOmission':best[2],
+                  'bestRate':round(best[3]*100,2) if best[2] is not None else None,
+                  'bestSample':best[1]}
+    return out
+
+def pattern_insights(date_str, period, limit=1000):
+    """History-tab evidence used by AI: distribution + omission hazard + hash diagnostics."""
+    idx_now=period_index(date_str,period); items=[]; wanted=[]
+    for off in range(1,int(limit)+1):
+        idx=idx_now-off; ordinal,zero=divmod(idx,1440); d=date.fromordinal(ordinal); pno=zero+1
+        target=period_target_block(d.strftime('%Y-%m-%d'),pno); items.append((d,pno,target)); wanted.append(target)
+    try: rows=get_db_blocks(wanted)
+    except Exception: rows={}
+    hist=[]; hashes=[]
+    for _,_,target in items:
+        r=rows.get(target)
+        if r and r.get('single_count') is not None:
+            hist.append(int(r['single_count'])); hashes.append(str(r.get('block_hash') or '').lower())
+    counts=[hist.count(i) for i in range(8)]; total=len(hist)
+    dist=[{'single':i,'count':counts[i],'rate':round(counts[i]/total*100,2) if total else 0} for i in range(8)]
+    hazard=omission_hazard_model(hist)
+    # Descriptive hash diagnostics only.  They are deliberately not labelled as a
+    # predictable next-hash formula because cryptographic hashes should not expose one.
+    ae={c:0 for c in 'abcde'}; digits={str(i):0 for i in range(10)}
+    for h in hashes:
+        for ch in h:
+            if ch in ae: ae[ch]+=1
+            if ch in digits: digits[ch]+=1
+    return {'samplePeriods':total,'requestedPeriods':int(limit),'distribution':dist,
+            'omissionHazard':{str(k):v for k,v in hazard.items()},
+            'hashDiagnostics':{'sampleHashes':len(hashes),'aeCounts':ae,'digitCounts':digits},
+            'note':'遗漏条件率为历史统计并经过平滑；哈希字符统计只用于检测偏差，不代表存在可追踪公式。'}
+
 def ai_analysis_from_data(groups, historical, relation=None):
     """Adaptive 8-class scoring model.
 
@@ -902,6 +979,7 @@ def ai_analysis_from_data(groups, historical, relation=None):
                 transition_n += 1
     trans_d = [(transition[i] + 1.0) / (transition_n + 8.0) for i in range(8)]
 
+    hazard = omission_hazard_model(hist)
     relation_signal = [1.0/8.0] * 8
     if relation and relation.get('positions'):
         votes = [1.0] * 8
@@ -935,9 +1013,10 @@ def ai_analysis_from_data(groups, historical, relation=None):
             0.12 * d100[i] +
             0.12 * dall[i] +
             0.09 * trans_d[i] +
-            0.18 * relation_signal[i] +
-            0.04 * omit_signal +
-            0.02 * (0.5 + momentum)
+            0.16 * relation_signal[i] +
+            0.03 * omit_signal +
+            0.02 * (0.5 + momentum) +
+            0.10 * dall[i] * max(0.60, min(1.40, float(hazard.get(i,{}).get('lift',1.0))))
         )
 
     total = sum(raw.values()) or 1.0
@@ -961,6 +1040,7 @@ def ai_conclusion17_from_data(groups, historical):
     baseline=[1,7,21,35,35,21,7,1]
     bsum=sum(baseline)
     baseline=[x/bsum for x in baseline]
+    hazard=omission_hazard_model(hist)
     scores={}
     for i in range(8):
         recent=(h50[i]+1)/(len(hist[:50])+8)
@@ -970,7 +1050,8 @@ def ai_conclusion17_from_data(groups, historical):
         # and unusually low states are bounded so random streaks cannot dominate.
         z=max(-1.5,min(1.5,(cur[i]-expected)/(max(expected,1)**0.5)))
         context=0.5 + 0.08*z
-        scores[i]=max(.0001, .45*recent + .40*long + .15*baseline[i]) * context
+        hz=max(0.65,min(1.35,float(hazard.get(i,{}).get('lift',1.0))))
+        scores[i]=max(.0001, .40*recent + .35*long + .15*baseline[i] + .10*long*hz) * context
     total=sum(scores.values()) or 1
     norm={str(i):round(scores[i]/total*100,2) for i in range(8)}
     pick=max(range(8), key=lambda i:(scores[i],-i))
@@ -1397,7 +1478,9 @@ def history_summary():
                         'dataConclusion':r.get('data_conclusion'),'aiAnalysis':r.get('ai_analysis'),
                         'top3':[int(x) for x in top][:3],'actualSingle':int(actual) if actual is not None else None,
                         'numbers':nums,'hit':hit,'verified':actual is not None})
-        return jsonify({'ok':True,'rows':out})
+        date_str, period, _, _ = current_period()
+        patterns=pattern_insights(date_str,period,1000)
+        return jsonify({'ok':True,'rows':out,'patterns':patterns})
     finally:
         db_release(conn)
 
