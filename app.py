@@ -1,5 +1,5 @@
 from pathlib import Path
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, jsonify, request
 from urllib.request import urlopen, Request
 import json
 import os
@@ -949,14 +949,18 @@ def calibrated_countdown_value():
     return 60 if sec == 0 else 60 - sec
 
 
-def save_prediction_if_ready(date_str, period, groups, target20):
+def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None):
     # The official AI decision is made exactly once in the final 10 seconds.
     # Before that we may calculate live signals internally, but they are not persisted as the prediction.
-    countdown = calibrated_countdown_value()
-    if countdown < 1 or countdown > 10:
+    # The browser countdown is the single source of truth for the 10-second lock.
+    # Only an explicit UI trigger at displayed 10 may create the official prediction.
+    countdown = int(ui_countdown) if ui_countdown is not None else None
+    if countdown != 10:
         return None
     stats=stats_from_groups(groups)
-    if stats.get('sampleSize') != 18 or groups.get('20'):
+    # Lock with whatever current-period evidence is available at UI 10.
+    # Do not miss the lock merely because one live group arrived late.
+    if int(stats.get('sampleSize') or 0) < 1 or groups.get('20'):
         return None
     historical=get_historical_official_singles(date_str, period)
     relation=group20_relation_model(date_str, period)
@@ -995,7 +999,7 @@ def verify_prediction(date_str, period, official):
     finally: db_release(conn)
 
 
-def prediction_summary(date_str, period, groups, target20, official):
+def prediction_summary(date_str, period, groups, target20, official, ui_countdown=None):
     key=f'{date_str}:{int(period):04d}'
     now=time.time()
     with _ai_summary_cache_lock:
@@ -1004,7 +1008,7 @@ def prediction_summary(date_str, period, groups, target20, official):
     if cached is not None and not official and now-cached_at < 1.0:
         return dict(cached)
     if official: verify_prediction(date_str,period,official)
-    else: save_prediction_if_ready(date_str,period,groups,target20)
+    else: save_prediction_if_ready(date_str,period,groups,target20,ui_countdown)
     conn=db_connect(); row=None; agg=None; latest_verified=None
     if conn is not None:
         try:
@@ -1177,7 +1181,8 @@ def draw():
         omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
         omission = {str(i): int(omission.get(str(i), 0) or 0) for i in range(8)}
         history = build_recent_official_history(date_str, period, 20)
-        ai_info = prediction_summary(date_str, period, groups, target20, official)
+        ui_countdown = request.args.get('ai_lock_countdown', type=int)
+        ai_info = prediction_summary(date_str, period, groups, target20, official, ui_countdown)
         payload = {
             **state, 'platformPeriod': platform_period, 'currentPeriod': period_str, 'groupPeriodKey': f'{date_str}:{period_str}',
             'targetResultBlock': target20, 'officialReady': bool(official),

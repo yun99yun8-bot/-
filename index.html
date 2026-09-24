@@ -264,14 +264,21 @@
     renderFixedResult(data);
   }
   var drawRequestBusy=false;
-  function loadDraw(){
+  var pendingAILock=false;
+  function loadDraw(aiLockCountdown){
+    if(aiLockCountdown===10) pendingAILock=true;
     if(drawRequestBusy)return;
+    var sendAILock=pendingAILock;
+    if(sendAILock) pendingAILock=false;
     drawRequestBusy=true;
-    var xhr=new XMLHttpRequest(); xhr.open('GET','/api/draw?t='+new Date().getTime(),true); xhr.setRequestHeader('Cache-Control','no-cache');
-    xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; drawRequestBusy=false; if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}}; xhr.onerror=function(){drawRequestBusy=false;}; xhr.ontimeout=function(){drawRequestBusy=false;};
+    var url='/api/draw?t='+new Date().getTime();
+    if(sendAILock) url+='&ai_lock_countdown=10';
+    var xhr=new XMLHttpRequest(); xhr.open('GET',url,true); xhr.setRequestHeader('Cache-Control','no-cache');
+    xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; drawRequestBusy=false; if(pendingAILock){setTimeout(function(){loadDraw(10);},0);} if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}}; xhr.onerror=function(){drawRequestBusy=false;}; xhr.ontimeout=function(){drawRequestBusy=false;};
     xhr.send(null);
   }
   var lastZeroMinute='';
+  var lastTenMinute='';
   function beijingParts(){
     var now=new Date();
     // Platform display was measured ~4s behind Beijing time.
@@ -285,6 +292,11 @@
     currentCountdownValue=value;
     text('countdown',value<10?'0'+value:value);
     var minuteKey=b.getFullYear()+'-'+(b.getMonth()+1)+'-'+b.getDate()+' '+b.getHours()+':'+b.getMinutes();
+    // Lock AI from the exact same displayed countdown. Fire once when UI shows 10.
+    if(value===10 && lastTenMinute!==minuteKey){
+      lastTenMinute=minuteKey;
+      loadDraw(10);
+    }
     if(value===0 && lastZeroMinute!==minuteKey){
       lastZeroMinute=minuteKey;
       loadDraw(); // official-result refresh at 00
