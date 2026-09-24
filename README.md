@@ -231,3 +231,13 @@ AI statistical analysis module:
 - Fixed `/api/system-health` RealDictCursor/ValueError path.
 - Worker prints a 30-second heartbeat to Render Logs.
 - Web remains read/API only unless RUN_EMBEDDED_WORKERS=1 is explicitly set.
+
+
+## V8.1.3 — Lifecycle Trace + Warm Backfill Root Fix
+- 修复 Worker 重启/重新部署时的关键采集缺口：不再用 PostgreSQL 的最大区块号直接作为 TRON ingest 的 last_seen。
+- 启动时强制把最新 80 个 TRON 区块回填到实时内存；避免 target-result-fast 先保存较新区块后导致 1–19 组被跳过。
+- period_runtime 新增 g17_ready_at、lock_attempts、lifecycle_trace。
+- Health 可直接看到 period_enter / groups_progress / g17_ready / lock_attempt / lock_success / g20_seen / missed_prediction / verified 的时间和当时组号。
+- AI 锁定仍严格要求第20组未出现；已经开奖的旧期不会事后补造预测。
+- MISSED_PREDICTION 会保存明确原因，便于继续定位而不是静默失败。
+- 模型版本：v8.1.3-lifecycle-trace-warmbackfill-1。

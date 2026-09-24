@@ -61,14 +61,14 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v8.1.2-prediction-lifecycle-1'
+MODEL_VERSION = 'v8.1.3-lifecycle-trace-warmbackfill-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
 _worker_threads = {}
 _worker_threads_lock = threading.Lock()
 _worker_restarts = {}
-AUTONOMOUS_STATES = ('COLLECTING','G17_READY','AI_LOCKED','WAIT_G20','RESULT_READY','VERIFIED','COMPLETE','MISSED_PREDICTION')
+AUTONOMOUS_STATES = ('COLLECTING','G17_READY','AI_LOCK_ATTEMPT','AI_LOCKED','WAIT_G20','RESULT_READY','VERIFIED','COMPLETE','MISSED_PREDICTION')
 
 
 
@@ -444,6 +444,9 @@ def init_db():
                         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                     )
                 """)
+                cur.execute("ALTER TABLE period_runtime ADD COLUMN IF NOT EXISTS g17_ready_at TIMESTAMPTZ")
+                cur.execute("ALTER TABLE period_runtime ADD COLUMN IF NOT EXISTS lock_attempts INTEGER NOT NULL DEFAULT 0")
+                cur.execute("ALTER TABLE period_runtime ADD COLUMN IF NOT EXISTS lifecycle_trace JSONB NOT NULL DEFAULT '{}'::jsonb")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_period_runtime_updated ON period_runtime(updated_at DESC)")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS service_heartbeats (
@@ -695,12 +698,22 @@ def tron_ingest_worker():
             latest = fetch_latest_block()
             end = int(latest['number'])
             if last_seen is None:
-                # Warm a small window once; afterwards only new blocks are fetched.
-                try:
-                    db_latest = get_db_latest_number()
-                except Exception:
-                    db_latest = None
-                last_seen = db_latest if db_latest is not None else max(end - 79, 0)
+                # V8.1.3: always warm the recent chain window into RAM.
+                # Do NOT seed last_seen from PostgreSQL: target-result-fast can
+                # persist a later target block first, which previously made the
+                # collector skip groups 1..19 after a deploy/restart.
+                warm_start = max(end - 79, 0)
+                for n in range(warm_start, end + 1):
+                    try:
+                        block = latest if n == end else fetch_block_by_number(n)
+                        publish_block_live(block)
+                        enqueue_block_for_db(block)
+                        last_seen = n
+                    except Exception as exc:
+                        worker_touch('tron-ingest', f'warmbackfill block={n}: {exc}')
+                        break
+                if last_seen is None:
+                    last_seen = max(end - 1, 0)
             if end > last_seen:
                 start_n = max(last_seen + 1, end - 79)
                 for n in range(start_n, end + 1):
@@ -835,41 +848,97 @@ def prediction_exists(period_key):
         if conn is not None:db_release(conn)
 
 
+def trace_period_lifecycle(date_str, period, target, event, groups=None, detail=None, increment_attempt=False):
+    """Persist compact lifecycle diagnostics so Web can inspect the Worker process."""
+    key=f'{date_str}:{int(period):04d}'
+    groups=groups or {}
+    present=sorted(int(x) for x in groups.keys() if str(x).isdigit())
+    now=datetime.now(CN_TZ).isoformat(timespec='milliseconds')
+    patch={str(event): {'at':now,'groups':present,'groupsSeen':len(present),
+                        'latestLiveBlock':_live_latest_number,'target20':int(target)}}
+    if detail is not None: patch[str(event)]['detail']=detail
+    conn=None
+    try:
+        conn=db_connect(retries=0)
+        if conn is None:return
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO period_runtime(period_key,period_date,period_no,target_block,state,groups_seen,g17_ready_at,lock_attempts,lifecycle_trace,updated_at)
+                    VALUES(%s,%s,%s,%s,'COLLECTING',%s,CASE WHEN %s='g17_ready' THEN NOW() ELSE NULL END,%s,%s::jsonb,NOW())
+                    ON CONFLICT(period_key) DO UPDATE SET
+                      groups_seen=GREATEST(period_runtime.groups_seen,EXCLUDED.groups_seen),
+                      g17_ready_at=CASE WHEN %s='g17_ready' THEN COALESCE(period_runtime.g17_ready_at,NOW()) ELSE period_runtime.g17_ready_at END,
+                      lock_attempts=period_runtime.lock_attempts + %s,
+                      lifecycle_trace=COALESCE(period_runtime.lifecycle_trace,'{}'::jsonb) || EXCLUDED.lifecycle_trace,
+                      updated_at=NOW()
+                """,(key,date_str,int(period),int(target),len(present),str(event),1 if increment_attempt else 0,json.dumps(patch),str(event),1 if increment_attempt else 0))
+    except Exception as exc:
+        with _runtime_health_lock:_runtime_health['lastDbError']=str(exc)[:300]
+    finally:
+        if conn is not None:db_release(conn)
+
+
 def autonomous_period_worker():
-    """Durable period state machine. Browser requests are never part of the lifecycle."""
+    """Durable period state machine with persisted V8.1.3 lifecycle tracing."""
+    last_key=None; last_seen=-1; last_official=False
     while True:
         worker_touch('period-engine')
         try:
             ds,p,_,_=current_period(); target=period_target_block(ds,p); key=f'{ds}:{int(p):04d}'
             groups,_=collect_groups_live(ds,p); seen=len(groups); official=groups.get('20')
+            if key != last_key:
+                last_key=key; last_seen=-1; last_official=False
+                trace_period_lifecycle(ds,p,target,'period_enter',groups)
+            if seen != last_seen:
+                last_seen=seen
+                trace_period_lifecycle(ds,p,target,'groups_progress',groups)
+            g17=all(str(i) in groups for i in range(1,18))
             if official:
+                if not last_official:
+                    last_official=True
+                    trace_period_lifecycle(ds,p,target,'g20_seen',groups)
                 row=prediction_exists(key)
                 if row is None:
-                    # Never fabricate a prediction after the result exists.
-                    set_period_runtime(ds,p,target,'MISSED_PREDICTION',seen)
+                    # Never fabricate after result. Persist the exact reason/context.
+                    trace_period_lifecycle(ds,p,target,'missed_prediction',groups,
+                        {'reason':'group20_seen_before_durable_prediction','g17Complete':g17})
+                    set_period_runtime(ds,p,target,'MISSED_PREDICTION',seen,'group20_seen_before_durable_prediction')
                 else:
                     set_period_runtime(ds,p,target,'RESULT_READY',seen)
                     try:
                         if verify_prediction(ds,p,official):
+                            trace_period_lifecycle(ds,p,target,'verified',groups)
                             set_period_runtime(ds,p,target,'VERIFIED',seen)
                     except Exception as exc:
+                        trace_period_lifecycle(ds,p,target,'verify_error',groups,str(exc)[:300])
                         set_period_runtime(ds,p,target,'RESULT_READY',seen,str(exc)[:300])
-            elif all(str(i) in groups for i in range(1,18)):
+            elif g17:
+                trace_period_lifecycle(ds,p,target,'g17_ready',groups)
                 set_period_runtime(ds,p,target,'G17_READY',seen)
                 try:
+                    trace_period_lifecycle(ds,p,target,'lock_attempt',groups,increment_attempt=True)
+                    set_period_runtime(ds,p,target,'AI_LOCK_ATTEMPT',seen)
                     save_conclusion17_if_ready(ds,p,groups,target)
-                    save_prediction_if_ready(ds,p,groups,target,force_backend=True)
+                    result=save_prediction_if_ready(ds,p,groups,target,force_backend=True)
                     flush_pending_ai_predictions()
-                    if prediction_exists(key) is not None:
+                    row=prediction_exists(key)
+                    if row is not None:
+                        trace_period_lifecycle(ds,p,target,'lock_success',groups,{'result':bool(result)})
                         set_period_runtime(ds,p,target,'AI_LOCKED',seen)
+                    else:
+                        trace_period_lifecycle(ds,p,target,'lock_not_durable',groups,
+                            {'pending':key in _pending_ai_predictions})
+                        set_period_runtime(ds,p,target,'G17_READY',seen,'lock_not_durable_retrying')
                 except Exception as exc:
+                    with _runtime_health_lock:_runtime_health['lastAiError']=str(exc)[:300]
+                    trace_period_lifecycle(ds,p,target,'lock_error',groups,str(exc)[:300])
                     set_period_runtime(ds,p,target,'G17_READY',seen,str(exc)[:300])
             else:
                 set_period_runtime(ds,p,target,'COLLECTING',seen)
         except Exception as exc:
             worker_touch('period-engine',exc)
         time.sleep(0.20)
-
 
 def _start_managed_worker(name, target):
     th=threading.Thread(target=target,name=name,daemon=True)
@@ -1976,7 +2045,7 @@ def system_health():
             cur.execute("SELECT COUNT(*) AS n FROM ai_predictions"); counts['predictions']=int(cur.fetchone()['n'])
             cur.execute("SELECT COUNT(*) AS n FROM system_events"); counts['events']=int(cur.fetchone()['n'])
             cur.execute("SELECT COUNT(*) AS n FROM period_runtime"); counts['runtimePeriods']=int(cur.fetchone()['n'])
-            cur.execute("SELECT state,groups_seen,updated_at,last_error,prediction_locked_at,result_ready_at,verified_at FROM period_runtime WHERE period_key=%s",(f'{ds}:{int(p):04d}',))
+            cur.execute("SELECT state,groups_seen,updated_at,last_error,prediction_locked_at,result_ready_at,verified_at,g17_ready_at,lock_attempts,lifecycle_trace FROM period_runtime WHERE period_key=%s",(f'{ds}:{int(p):04d}',))
             pr=cur.fetchone()
             cur.execute("SELECT service_name,service_role,instance_id,model_version,current_period,current_period_key,status,detail,started_at,updated_at FROM service_heartbeats ORDER BY updated_at DESC")
             services=[dict(r) for r in cur.fetchall()]
