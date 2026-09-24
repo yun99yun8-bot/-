@@ -284,13 +284,13 @@ def king_prediction(day, idx, period, rows):
     with lock:
         c=db(); existing=c.execute("SELECT prediction FROM king_predictions WHERE day=? AND period_index=?",(day,idx)).fetchone()
         if existing and existing["prediction"]: c.close(); return existing["prediction"]
-    counts=Counter(f"{r['odd']}单{r['even']}双" for r in rows[:17])
+    counts=Counter(f"单{r['odd']}" for r in rows[:17])
     if not counts: return None
     mx=max(counts.values()); candidates=[k for k,v in counts.items() if v==mx]
     pred=candidates[0]
     if len(candidates)>1:
         for r in reversed(rows[:17]):
-            k=f"{r['odd']}单{r['even']}双"
+            k=f"单{r['odd']}"
             if k in candidates: pred=k; break
     with lock:
         c=db(); c.execute("""INSERT OR IGNORE INTO king_predictions(day,period_index,period,prediction,predicted_at)
@@ -302,7 +302,7 @@ def resolve_king(day,idx,period,rows):
     if len(rows)<20: return
     pred=king_prediction(day,idx,period,rows)
     if not pred: return
-    actual=f"{rows[19]['odd']}单{rows[19]['even']}双"; hit=int(pred==actual)
+    actual=f"单{rows[19]['odd']}"; hit=int(pred==actual)
     with lock:
         c=db(); c.execute("UPDATE king_predictions SET actual=?,hit=?,resolved_at=? WHERE day=? AND period_index=? AND actual IS NULL",(actual,hit,datetime.now(timezone.utc).isoformat(),day,idx)); c.commit(); c.close()
 
@@ -406,8 +406,11 @@ def state():
         actual_block=int(r20["block"]); actual_hash=r20["hash"]
     recent60=all_rows[-60:]
     single_counts={str(i):sum(1 for r in recent60 if int(r["odd"])==i) for i in range(0,7)}
-    combo_counts=Counter(f"{r['odd']}单{r['even']}双" for r in recent60)
+    combo_counts=Counter(f"单{r['odd']}" for r in recent60)
     current20=[dict(r) for r in current_rows]
+    ccounts={str(i):sum(1 for r in current_rows if int(r["odd"])==i) for i in range(0,7)}
+    ctotal=len(current_rows)
+    cprobs={k:round(v*100/ctotal,2) if ctotal else 0 for k,v in ccounts.items()}
     histpred=historical_prediction(all_rows,period)
     latest_copy=dict(latest); latest_copy.update({"target_block":target,"chain_block":chain,"progress":progress})
     return {"latest":latest_copy,"day":day,"current_time":day,"period_index":idx,"display_period":f"{idx:04d}",
@@ -416,7 +419,7 @@ def state():
             "hit_rate":round(int(done["h"] or 0)*100/int(done["n"]),1) if int(done["n"] or 0) else 0,
             "single_counts":single_counts,"combo_counts":dict(combo_counts.most_common()),
             "king_history":[dict(x) for x in cycles],"current20":[dict(x) for x in current20],
-            "current20_single_counts":current20_single_counts,"current20_single_probs":current20_single_probs,
+            "current20_single_counts":ccounts,"current20_single_probs":cprobs,
             "history":[dict(x) for x in recent60[::-1]],"history_all":[dict(x) for x in all_rows[::-1]],
             "history_count":len(all_rows),"historical_prediction":histpred}
 
@@ -584,7 +587,7 @@ async function refresh(){
   document.getElementById('chain').textContent=l.chain_block||'-';
 
   document.getElementById('pred').textContent=d.prediction ? ('预判期：'+d.display_period+'期｜'+d.prediction) : '等待17/20预判';
-  document.getElementById('actual').textContent=d.actual ? ('开奖期：'+d.display_period+'期｜第20组：'+d.actual.replace(/\d+双/g,'')) : '等待20/20开奖';
+  document.getElementById('actual').textContent=d.actual ? ('开奖期：'+d.display_period+'期｜第20组：'+d.actual) : '等待20/20开奖';
   document.getElementById('status').textContent=d.actual?'已开奖':'等待中';
 
   const actualNums=d.actual_numbers||[];
@@ -619,7 +622,7 @@ async function refresh(){
 
   const combo=Object.entries(d.combo_counts||{});
   document.getElementById('comboStats').innerHTML=
-   combo.map(x=>'<span class="badge">'+esc((x[0].match(/^(\d+)单/)||['',x[0]])[1])+'单 × '+x[1]+'期</span>').join('')||'暂无';
+   combo.map(x=>'<span class="badge">'+esc(x[0])+' × '+x[1]+'期</span>').join('')||'暂无';
 
   const hp=d.historical_prediction;
   document.getElementById('histPredPeriod').textContent=hp ? (hp.target_period.slice(-4)+'期') : '-';
