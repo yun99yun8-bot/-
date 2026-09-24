@@ -18,14 +18,14 @@
         <div class="section-title">数据统计</div>
         <div class="stats-note">按当前期第1～18组区块数据统计</div>
         <div class="prob-grid" id="probGrid">
-          <div class="prob-item" data-single="3">单3<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-single="4">单4<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-single="5">单5<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-single="2">单2<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-single="0">单0<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-single="7">单7<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-single="1">单1<small>次数：--次</small><small>概率：--%</small></div>
-          <div class="prob-item" data-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-prob-single="3">单3<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-prob-single="4">单4<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-prob-single="5">单5<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-prob-single="2">单2<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-prob-single="0">单0<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-prob-single="7">单7<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-prob-single="1">单1<small>次数：--次</small><small>概率：--%</small></div>
+          <div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
         </div>
         <div class="conclusion" id="statsConclusion">结论：等待第1～18组数据</div>
       </section>
@@ -108,7 +108,7 @@
   function renderStats(data){
     const rows = data.dataStats?.stats || [];
     rows.forEach(row=>{
-      const el=document.querySelector(`[data-single="${row.single}"]`);
+      const el=document.querySelector(`[data-prob-single="${row.single}"]`);
       if(!el) return;
       const sm=el.querySelectorAll('small');
       if(sm[0]) sm[0].textContent=`次数：${row.count}次`;
@@ -139,11 +139,16 @@
     try{
       const res=await fetch('/api/draw',{cache:'no-store'});
       const data=await res.json();
-      if(!data.ok) throw new Error(data.error||'开奖数据获取失败');
-      document.getElementById('periodValue').textContent=data.platformPeriod || data.period || '0000000000';
-      document.getElementById('singleValue').textContent=(data.singleCount ?? '--');
-      document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=(data.numbers&&data.numbers[i])||'--';});
-      document.getElementById('blockValue').textContent=data.blockNumber??'--';
+      if(!data.ok) { console.error('API错误', data); throw new Error(data.error||'开奖数据获取失败'); }
+      console.log('Torn API状态', data.debug || {}, data);
+      // Result fields are deliberately read from the confirmed-result keys.
+      // The API may simultaneously report the current period while retaining
+      // the previous confirmed result until the new group-20 block exists.
+      const resultNumbers = Array.isArray(data.resultNumbers) ? data.resultNumbers : (Array.isArray(data.numbers) ? data.numbers : []);
+      document.getElementById('periodValue').textContent=data.resultPlatformPeriod || data.platformPeriod || data.period || '0000000000';
+      document.getElementById('singleValue').textContent=(data.resultSingleCount ?? data.singleCount ?? '--');
+      document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=resultNumbers[i] || '--';});
+      document.getElementById('blockValue').textContent=data.resultBlockNumber ?? data.blockNumber ?? '--';
       renderStats(data);
       renderOmission(data);
       renderGroups(data.groups||[]);

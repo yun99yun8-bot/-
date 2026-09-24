@@ -11,6 +11,9 @@ app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path='')
 TRON_API = 'https://api.trongrid.io/wallet'
 TRON_NOWBLOCK = f'{TRON_API}/getnowblock'
 TRON_BLOCK_BY_NUM = f'{TRON_API}/getblockbynum'
+TRON_SOLIDITY_API = 'https://api.trongrid.io/walletsolidity'
+TRON_SOLIDITY_NOWBLOCK = f'{TRON_SOLIDITY_API}/getnowblock'
+TRON_SOLIDITY_BLOCK_BY_NUM = f'{TRON_SOLIDITY_API}/getblockbynum'
 
 CN_TZ = timezone(timedelta(hours=8))
 STATE_FILE = BASE_DIR / 'draw_state.json'
@@ -37,36 +40,45 @@ def period_index(date_str, period):
     return d.toordinal() * 1440 + (int(period) - 1)
 
 
+def _get_json(url, method='GET', payload=None):
+    data = json.dumps(payload).encode('utf-8') if payload is not None else None
+    req = Request(url, data=data, headers={'Content-Type': 'application/json', 'User-Agent': 'TornMonitor/2.1'}, method=method)
+    with urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode('utf-8'))
+
 def fetch_latest_block():
-    req = Request(TRON_NOWBLOCK, headers={'User-Agent': 'TornMonitor/1.0'})
-    with urlopen(req, timeout=8) as resp:
-        data = json.loads(resp.read().decode('utf-8'))
-    block_id = data.get('blockID')
-    number = data.get('block_header', {}).get('raw_data', {}).get('number')
-    timestamp = data.get('block_header', {}).get('raw_data', {}).get('timestamp')
-    if not block_id or not isinstance(block_id, str) or number is None:
-        raise RuntimeError('TRON 最新区块没有返回有效数据')
-    return {'block': block_id, 'number': int(number), 'timestamp': timestamp}
+    errors = []
+    for url in (TRON_NOWBLOCK, TRON_SOLIDITY_NOWBLOCK):
+        try:
+            data = _get_json(url)
+            block_id = data.get('blockID')
+            number = data.get('block_header', {}).get('raw_data', {}).get('number')
+            timestamp = data.get('block_header', {}).get('raw_data', {}).get('timestamp')
+            if block_id and isinstance(block_id, str) and number is not None:
+                return {'block': block_id, 'number': int(number), 'timestamp': timestamp}
+            errors.append(url + ': invalid response')
+        except Exception as e:
+            errors.append(url + ': ' + str(e))
+    raise RuntimeError('TRON 最新区块接口不可用；' + ' | '.join(errors))
 
 
 def fetch_block_by_number(number):
-    payload = json.dumps({'num': int(number)}).encode('utf-8')
-    req = Request(
-        TRON_BLOCK_BY_NUM,
-        data=payload,
-        headers={'Content-Type': 'application/json', 'User-Agent': 'TornMonitor/1.0'},
-        method='POST'
-    )
-    with urlopen(req, timeout=8) as resp:
-        data = json.loads(resp.read().decode('utf-8'))
-    block_id = data.get('blockID')
-    if not block_id or not isinstance(block_id, str):
-        raise RuntimeError(f'目标区块 {number} 尚未可读取')
-    return {
-        'block': block_id,
-        'number': int(data.get('block_header', {}).get('raw_data', {}).get('number', number)),
-        'timestamp': data.get('block_header', {}).get('raw_data', {}).get('timestamp')
-    }
+    errors = []
+    payload = {'num': int(number)}
+    for url in (TRON_BLOCK_BY_NUM, TRON_SOLIDITY_BLOCK_BY_NUM):
+        try:
+            data = _get_json(url, method='POST', payload=payload)
+            block_id = data.get('blockID')
+            if block_id and isinstance(block_id, str):
+                return {
+                    'block': block_id,
+                    'number': int(data.get('block_header', {}).get('raw_data', {}).get('number', number)),
+                    'timestamp': data.get('block_header', {}).get('raw_data', {}).get('timestamp')
+                }
+            errors.append(url + ': block not found')
+        except Exception as e:
+            errors.append(url + ': ' + str(e))
+    raise RuntimeError(f'目标区块 {number} 尚未可读取；' + ' | '.join(errors))
 
 
 def calc_numbers(block_hash):
@@ -295,16 +307,28 @@ def draw():
         # If there is no current official result, return the prior published result
         # fields while still exposing current-period statistics when available.
         current_stats = stats_from_groups(groups)
+        # Return dedicated result fields as well as the legacy state fields.
+        # This keeps the frontend stable even when the current period is still
+        # waiting for group 20 or when an older confirmed result is being kept.
+        saved_numbers = state.get('numbers') if isinstance(state.get('numbers'), list) else []
+        saved_omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
+        saved_omission = {str(i): int(saved_omission.get(str(i), 0) or 0) for i in range(8)}
         response = {
             **state,
             'platformPeriod': platform_period,
             'currentPeriod': period_str,
             'targetResultBlock': target20,
             'officialReady': bool(official),
+            'resultNumbers': saved_numbers,
+            'resultSingleCount': state.get('singleCount'),
+            'resultBlockNumber': state.get('blockNumber'),
+            'resultPlatformPeriod': state.get('platformPeriod'),
+            'omission': saved_omission,
             'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
             'dataStats': current_stats,
             'ok': True,
-            'isNew': bool(official)
+            'isNew': bool(official),
+            'debug': {'latestBlock': latest.get('number'), 'targetBlock': target20, 'officialBlock': official.get('blockNumber') if official else None, 'officialReady': bool(official)}
         }
         if not official and not state.get('numbers'):
             response['waitingForNewResult'] = True
@@ -312,10 +336,17 @@ def draw():
     except Exception as exc:
         # Never erase a confirmed result on a transient API error.
         if state.get('numbers'):
+            saved_omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
+            saved_omission = {str(i): int(saved_omission.get(str(i), 0) or 0) for i in range(8)}
             response = {
                 **state,
                 'platformPeriod': platform_period,
                 'currentPeriod': period_str,
+                'resultNumbers': state.get('numbers', []),
+                'resultSingleCount': state.get('singleCount'),
+                'resultBlockNumber': state.get('blockNumber'),
+                'resultPlatformPeriod': state.get('platformPeriod'),
+                'omission': saved_omission,
                 'dataStats': stats_from_groups(state.get('groups', {})),
                 'ok': True,
                 'isNew': False,
@@ -323,7 +354,7 @@ def draw():
                 'error': str(exc)
             }
             return jsonify(response)
-        return jsonify({'ok': False, 'error': str(exc)}), 502
+        return jsonify({'ok': False, 'error': str(exc), 'debug': {'date': date_str, 'period': period_str, 'targetBlock': target20 if 'target20' in locals() else None}}), 502
 
 
 if __name__ == '__main__':
