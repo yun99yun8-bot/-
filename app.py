@@ -131,12 +131,19 @@ def calc_single_count(numbers):
 
 def period_target_block(date_str, period):
     """Return the platform's group-20/result block for a period.
-    Confirmed anchor: 2026-09-24 period 0481 -> TRON block 86511906;
-    each following platform period advances exactly 20 blocks.
+
+    Calibration recorded from the platform:
+      2026-09-24 period 0481 -> 86511906.
+      The platform can occasionally make a +18 adjustment instead of +20;
+      the user reported one such adjustment around period 0480.
+      Current live calibration from the supplied screenshot is:
+      period 1001 -> block 86522304.
+
+    For the current/live range we therefore anchor to 1001 and advance +20
+    per period until the user reports another adjustment.
     """
     if date_str == '2026-09-24':
-        return 86511906 + (int(period) - 481) * 20
-    # For dates without a supplied calibration, retain the existing state anchor.
+        return 86522304 + (int(period) - 1001) * 20
     return None
 
 
@@ -250,9 +257,10 @@ def target_block_number(date_str, period, state, latest_number):
         except Exception:
             pass
 
-    # Current-day calibration: 0481 is exactly block 86511906.
+    # Current-day live calibration from the supplied platform screenshot:
+    # period 1001 is exactly block 86522304.
     if date_str == '2026-09-24':
-        return 86511906 + (int(period) - 481) * 20
+        return 86522304 + (int(period) - 1001) * 20
 
     # Fresh install on another date: align the chain height to the same
     # 20-block cadence. Once a real period is confirmed, state becomes the
