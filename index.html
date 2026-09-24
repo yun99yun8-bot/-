@@ -31,7 +31,6 @@
         <div class="section-title">AI分析结论</div>
         <div class="conclusion primary-conclusion" id="statsConclusion">AI结论：正在收集前17组数据</div>
         <div class="conclusion" id="aiAnalysisLine">AI分析：正在分析中…</div>
-        <div class="deep-ai-line" id="deepAIInsight">深度AI复核：等待前17组数据</div>
         <div class="ai-panel">
           <div class="ai-result-box" id="aiVerifyResult">预测验证：等待已开奖预测</div>
           <div class="ai-lines">
@@ -223,14 +222,6 @@
       relParts.push('第'+rel[ri].group+'组 '+cs+' · '+Number(rel[ri].matchRate||0).toFixed(2)+'%');
     }
     text('relationTop3',relParts.length?'历史高关联组次：'+relParts.join('　｜　'):'历史高关联组次：等待数据');
-    var deep=ai.deepAI||{};
-    if(deep.ready && Array.isArray(deep.top3)){
-      text('deepAIInsight','深度AI复核：'+deep.top3.map(function(v,i){return (i+1)+'.单'+v;}).join('　')+'｜信心 '+(deep.confidence||'低')+'｜'+(deep.reason||'统计复核完成'));
-    }else if(deep.enabled){
-      text('deepAIInsight','深度AI复核：'+(deep.status||'分析中…'));
-    }else{
-      text('deepAIInsight','深度AI复核：未启用（Render配置OPENAI_API_KEY后自动开启）');
-    }
     var vr=ai.latestVerified;
     if(vr && Array.isArray(vr.top3)){
       var parts=[];
