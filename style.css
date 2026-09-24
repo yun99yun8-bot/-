@@ -58,3 +58,18 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .group-table td:nth-child(4){text-align:left;letter-spacing:.5px}
 /* 20组固定框架：无数据时保留行位，有数据时自动填入对应组 */
 .group-table tbody tr.waiting td { opacity: .55; }
+
+/* 往期20期单几小板块 */
+.result-history-card { padding-bottom: 14px; }
+.history20-note { font-size: 12px; color: #98a2b3; margin: -4px 0 10px; }
+.history20-grid { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto; overflow-y: hidden; padding-bottom: 4px; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+.history20-item { flex: 0 0 72px; min-height: 52px; border: 1px solid #e7ecf4; border-radius: 10px; background: #f8fbff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; overflow: hidden; }
+.history20-item strong { font-size: 12px; color: #50627d; font-weight: 600; }
+.history20-item small { font-size: 15px; color: #2f6fed; font-weight: 700; }
+.history20-item.waiting { background: #fafafa; border-style: dashed; }
+.history20-item.waiting strong, .history20-item.waiting small { color: #b0b8c5; }
+@media (max-width: 420px) {
+  .history20-grid { gap: 6px; }
+  .history20-item { min-height: 50px; }
+  .history20-item strong { font-size: 11px; }
+}

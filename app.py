@@ -210,7 +210,25 @@ def collect_period_groups(date_str, period, latest_number, state):
     return groups, target20
 
 def stats_from_groups(groups):
-    """Statistics are based only on groups 1-18."""
+    """Use only groups 1-18 of ONE 20-group round.
+
+    Once group 20 is confirmed, the round is complete and the statistics
+    reset to zero. This prevents group 1-18 from the previous round from
+    being mixed with group 1-18 of the next round.
+    """
+    groups = groups if isinstance(groups, dict) else {}
+    complete = groups.get('20')
+    if isinstance(complete, dict) and complete.get('numbers'):
+        counts = {str(i): 0 for i in range(8)}
+        return {
+            'sampleSize': 0,
+            'stats': [
+                {'single': i, 'count': 0, 'probability': 0}
+                for i in range(8)
+            ],
+            'highest': []
+        }
+
     counts = {str(i): 0 for i in range(8)}
     used = 0
     for group_no in range(1, 19):
@@ -240,6 +258,25 @@ def write_state(data):
     tmp = STATE_FILE.with_suffix('.tmp')
     tmp.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
     tmp.replace(STATE_FILE)
+
+
+def update_result_history(state, official):
+    """Keep the latest 20 confirmed platform results for the small history panel."""
+    history = state.get('resultHistory') if isinstance(state.get('resultHistory'), list) else []
+    key = str(official.get('platformPeriod') or '')
+    if not key:
+        key = f"{state.get('date','')}{state.get('period','')}"
+    item = {
+        'platformPeriod': key,
+        'period': str(official.get('period') or state.get('period') or ''),
+        'blockNumber': official.get('blockNumber'),
+        'singleCount': official.get('singleCount'),
+    }
+    history = [x for x in history if str(x.get('platformPeriod','')) != key]
+    history.append(item)
+    history.sort(key=lambda x: str(x.get('platformPeriod','')))
+    state['resultHistory'] = history[-20:]
+    return state['resultHistory']
 
 
 def update_omission(state, official):
@@ -305,7 +342,18 @@ def draw():
 
     try:
         latest = fetch_latest_block()
-        groups, target20 = collect_period_groups(date_str, period, latest['number'], state)
+
+        # A new platform period starts a completely new 20-group round.
+        # Keep the confirmed result/history/omission, but never carry the
+        # previous period's group 1-20 cache into the next period's stats.
+        current_key = f'{date_str}:{period_str}'
+        state_group_key = state.get('groupPeriodKey')
+        working_state = dict(state)
+        if state_group_key != current_key:
+            working_state['groups'] = {}
+            working_state['groupPeriodKey'] = current_key
+
+        groups, target20 = collect_period_groups(date_str, period, latest['number'], working_state)
 
         # Official result = group 20. collect_period_groups prioritizes this
         # row, so do not make a second blocking network request here.
@@ -330,13 +378,15 @@ def draw():
                 'numbers': official['numbers'],
                 'singleCount': official['singleCount'],
                 'groups': groups,
+                'groupPeriodKey': current_key,
                 'source': 'TRONGrid / getblockbynum'
             }
             state['omission'] = update_omission(state, official)
+            update_result_history(state, official)
             write_state(state)
         else:
             # Keep same-period group cache even when group 20 is not ready.
-            state.update({'date': date_str, 'period': period_str, 'platformPeriod': platform_period, 'groups': groups})
+            state.update({'date': date_str, 'period': period_str, 'platformPeriod': platform_period, 'groups': groups, 'groupPeriodKey': current_key})
             write_state(state)
 
         # If there is no current official result, return the prior published result
@@ -375,6 +425,7 @@ def draw():
             'resultPlatformPeriod': result_obj.get('platformPeriod') if result_obj and result_obj.get('platformPeriod') else (state.get('platformPeriod') if saved_numbers else None),
             'result': result_obj,
             'omission': saved_omission,
+            'resultHistory': state.get('resultHistory', []) if isinstance(state.get('resultHistory'), list) else [],
             'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
             'dataStats': current_stats,
             'ok': True,
