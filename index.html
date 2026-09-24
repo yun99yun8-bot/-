@@ -32,16 +32,16 @@
       <section class="card hero-card">
         <div class="result-head">
           <div class="section-title">开奖结果</div>
-          <div class="period-badge">第 <strong>0000</strong> 期</div>
+          <div class="period-badge">第 <strong id="periodValue">0000</strong> 期</div>
         </div>
         <div class="result-grid" aria-label="七个开奖结果">
-          <div class="result-box">--</div>
-          <div class="result-box">--</div>
-          <div class="result-box">--</div>
-          <div class="result-box">--</div>
-          <div class="result-box">--</div>
-          <div class="result-box">--</div>
-          <div class="result-box">--</div>
+          <div class="result-box" data-result="0">--</div>
+          <div class="result-box" data-result="1">--</div>
+          <div class="result-box" data-result="2">--</div>
+          <div class="result-box" data-result="3">--</div>
+          <div class="result-box" data-result="4">--</div>
+          <div class="result-box" data-result="5">--</div>
+          <div class="result-box" data-result="6">--</div>
         </div>
       </section>
 
@@ -95,6 +95,20 @@
   }
   tornTab.addEventListener('click',()=>selectTab(tornTab));
   historyTab.addEventListener('click',()=>selectTab(historyTab));
+
+  async function loadDraw(){
+    try{
+      const res=await fetch('/api/draw',{cache:'no-store'});
+      const data=await res.json();
+      if(!data.ok) throw new Error(data.error||'开奖数据获取失败');
+      document.getElementById('periodValue').textContent=data.period;
+      document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=data.numbers[i]||'--';});
+    }catch(err){
+      console.error(err);
+    }
+  }
+  loadDraw();
+  setInterval(loadDraw, 15000);
 </script>
 </body>
 </html>
