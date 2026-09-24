@@ -108,6 +108,20 @@ def write_state(data):
     tmp.replace(STATE_FILE)
 
 
+def update_omission(previous, single_count):
+    """After each newly confirmed period: the observed single-count resets to 0;
+    every other single-count omission increases by 1. Values are persisted in state.
+    """
+    current = {}
+    if isinstance(previous, dict):
+        current = {str(i): int(previous.get(str(i), 0)) for i in range(8)}
+    else:
+        current = {str(i): 0 for i in range(8)}
+    for i in range(8):
+        current[str(i)] = 0 if i == int(single_count) else current[str(i)] + 1
+    return current
+
+
 def target_block_number(date_str, period, state, latest_number):
     """Map platform periods to the corresponding TRON result block.
 
@@ -155,7 +169,7 @@ def draw():
 
     # Same platform period: never recalculate or replace its published result.
     if state and state.get('date') == date_str and state.get('period') == period_str and state.get('numbers'):
-        return jsonify({**state, 'platformPeriod': platform_period, 'singleCount': sum(int(n) % 2 for n in state['numbers']), 'ok': True, 'isNew': False})
+        return jsonify({**state, 'platformPeriod': platform_period, 'singleCount': sum(int(n) % 2 for n in state['numbers']), 'omission': state.get('omission', {str(i): 0 for i in range(8)}), 'ok': True, 'isNew': False})
 
     try:
         latest = fetch_latest_block()
@@ -165,12 +179,13 @@ def draw():
         # result visible instead of clearing the screen.
         if target_number > latest['number']:
             if state and state.get('numbers'):
-                return jsonify({**state, 'platformPeriod': platform_period, 'waitingForNewResult': True, 'ok': True, 'isNew': False})
+                return jsonify({**state, 'platformPeriod': platform_period, 'omission': state.get('omission', {str(i): 0 for i in range(8)}), 'waitingForNewResult': True, 'ok': True, 'isNew': False})
             return jsonify({'ok': False, 'waitingForNewResult': True, 'error': '等待对应开奖区块'})
 
         target = fetch_block_by_number(target_number)
         numbers = calc_numbers(target['block'])
         single_count = sum(n % 2 for n in numbers)
+        omission = update_omission(state.get('omission') if state else None, single_count)
         new_state = {
             'date': date_str,
             'period': period_str,
@@ -179,13 +194,14 @@ def draw():
             'blockNumber': target_number,
             'numbers': [f'{n:02d}' for n in numbers],
             'singleCount': single_count,
+            'omission': omission,
             'source': 'TRONGrid / getblockbynum'
         }
         write_state(new_state)
         return jsonify({**new_state, 'ok': True, 'isNew': True})
     except Exception as exc:
         if state and state.get('numbers'):
-            return jsonify({**state, 'platformPeriod': platform_period, 'ok': True, 'isNew': False, 'waitingForNewResult': True, 'error': str(exc)})
+            return jsonify({**state, 'platformPeriod': platform_period, 'omission': state.get('omission', {str(i): 0 for i in range(8)}), 'ok': True, 'isNew': False, 'waitingForNewResult': True, 'error': str(exc)})
         return jsonify({'ok': False, 'error': str(exc)}), 502
 
 

@@ -51,14 +51,14 @@
       <section class="card">
         <div class="section-title">遗漏统计</div>
         <div class="omission-grid">
-          <div class="stat">单0<small>--期</small></div>
-          <div class="stat">单1<small>--期</small></div>
-          <div class="stat">单2<small>--期</small></div>
-          <div class="stat">单3<small>--期</small></div>
-          <div class="stat">单4<small>--期</small></div>
-          <div class="stat">单5<small>--期</small></div>
-          <div class="stat">单6<small>--期</small></div>
-          <div class="stat">单7<small>--期</small></div>
+          <div class="stat">单0<small id="omission0">--期</small></div>
+          <div class="stat">单1<small id="omission1">--期</small></div>
+          <div class="stat">单2<small id="omission2">--期</small></div>
+          <div class="stat">单3<small id="omission3">--期</small></div>
+          <div class="stat">单4<small id="omission4">--期</small></div>
+          <div class="stat">单5<small id="omission5">--期</small></div>
+          <div class="stat">单6<small id="omission6">--期</small></div>
+          <div class="stat">单7<small id="omission7">--期</small></div>
         </div>
       </section>
 
@@ -108,6 +108,7 @@
       document.getElementById('singleValue').textContent=(data.singleCount ?? '--');
       document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=(data.numbers&&data.numbers[i])||'--';});
       document.getElementById('blockValue').textContent=data.blockNumber??'--';
+      for(let i=0;i<=7;i++){ document.getElementById('omission'+i).textContent=((data.omission&&data.omission[String(i)]) ?? '--')+'期'; }
     }catch(err){
       console.error(err);
     }
