@@ -1126,6 +1126,9 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
     highest=stats.get('highest') or []
     # A tied data conclusion is not forced into a false single choice.
     data_conclusion=int(highest[0]['single']) if len(highest)==1 else None
+    # Capture the strict current-period 1..17 conclusion in the same pre-result
+    # prediction row. Group 20 is never used to create this conclusion.
+    c17 = ai_conclusion17_from_data(groups, historical, date_str, period, target20)
     key=f'{date_str}:{int(period):04d}'
     conn=db_connect()
     if conn is None: return None
@@ -1133,10 +1136,13 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
         with conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT(period_key) DO NOTHING
-                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3),int(stats.get('sampleSize') or 0)))
+                    INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size,conclusion17,conclusion17_mode)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(period_key) DO UPDATE SET
+                      conclusion17=COALESCE(ai_predictions.conclusion17,EXCLUDED.conclusion17),
+                      conclusion17_mode=COALESCE(ai_predictions.conclusion17_mode,EXCLUDED.conclusion17_mode)
+                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3),int(stats.get('sampleSize') or 0),
+                       c17.get('single') if c17 else None, c17.get('mode') if c17 else None))
     finally: db_release(conn)
     return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True,'period':int(period),'lockCountdown':countdown}
 

@@ -192,7 +192,20 @@
     // Only expose the official AI analysis during the final 10..1 seconds.
     // At 00 and during 60..11 it returns to analysing; the locked DB record is retained for verification.
     var showLockedAI=(currentCountdownValue>=1 && currentCountdownValue<=10 && ai.frozen && aiSingle!==null);
-    text('aiAnalysisLine', showLockedAI ? ('AI分析：单'+aiSingle+'　｜　第'+String(aiPeriod).padStart(4,'0')+'期　｜　已锁定') : 'AI分析：正在分析中…');
+    if(showLockedAI){
+      var bb=beijingParts();
+      aiLockConfirmedMinute=bb.getFullYear()+'-'+(bb.getMonth()+1)+'-'+bb.getDate()+' '+bb.getHours()+':'+bb.getMinutes();
+    }
+    // Before the final lock, expose that the model is actively computing while
+    // keeping the value explicitly marked as live/unlocked. At 10 seconds the
+    // frozen value replaces it and remains unchanged until the period closes.
+    if(showLockedAI){
+      text('aiAnalysisLine','AI分析：单'+aiSingle+'　｜　第'+String(aiPeriod).padStart(4,'0')+'期　｜　已锁定');
+    }else if(aiSingle!==null && currentCountdownValue>10){
+      text('aiAnalysisLine','AI分析：单'+aiSingle+'　｜　实时分析中（未锁定）');
+    }else{
+      text('aiAnalysisLine','AI分析：正在分析中…');
+    }
     for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
     ranked.sort(function(a,b){return b.score-a.score || a.single-b.single;});
     var lockedTop=Array.isArray(ai.top3)?ai.top3:[];
@@ -285,7 +298,7 @@
   }
   function render(data){
     var rp=String(data.currentPeriod||'').padStart(4,'0');
-    if(lastRenderPeriod && rp && lastRenderPeriod!==rp){ lastGoodAI=null; lastGoodAIPeriod=''; }
+    if(lastRenderPeriod && rp && lastRenderPeriod!==rp){ lastGoodAI=null; lastGoodAIPeriod=''; aiLockConfirmedMinute=''; }
     if(rp) lastRenderPeriod=rp;
     var status=document.getElementById('homeLiveStatus');
     if(status){
@@ -331,6 +344,13 @@
     // Lock AI from the exact same displayed countdown. Fire once when UI shows 10.
     if(value===10 && lastTenMinute!==minuteKey){
       lastTenMinute=minuteKey;
+      loadDraw(10);
+    }
+    // If the exact-10 request was lost to a transient Render/DB/network delay,
+    // keep retrying the SAME 10-second lock event during 9..1 until the backend
+    // confirms a frozen prediction. This does not move the decision time later;
+    // it only makes delivery of the original lock resilient.
+    if(value>=1 && value<=9 && aiLockConfirmedMinute!==minuteKey){
       loadDraw(10);
     }
     if(value===0 && lastZeroMinute!==minuteKey){
