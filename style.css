@@ -56,3 +56,5 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .group-table th,.group-table td{padding:7px 5px;border-bottom:1px solid #e5ebf3;text-align:center;white-space:nowrap}
 .group-table th{background:#f3f7fc;color:#53657d;font-weight:800}
 .group-table td:nth-child(4){text-align:left;letter-spacing:.5px}
+/* 20组固定框架：无数据时保留行位，有数据时自动填入对应组 */
+.group-table tbody tr.waiting td { opacity: .55; }

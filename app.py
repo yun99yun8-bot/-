@@ -165,7 +165,8 @@ def collect_period_groups(date_str, period, latest_number, state):
     groups = {str(k): v for k, v in groups.items() if isinstance(v, dict)}
 
     # A group is the corresponding consecutive TRON block; group 20 is target20.
-    for group_no in range(1, 20):
+    # Keep all 20 rows in the period table. Statistics still use only 1-18.
+    for group_no in range(1, 21):
         block_number = target20 - (20 - group_no)
         if block_number > latest_number:
             continue

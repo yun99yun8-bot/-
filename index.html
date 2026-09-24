@@ -64,7 +64,7 @@
       </section>
 
       <section class="card">
-        <div class="section-title">20期区块数据</div>
+        <div class="section-title">20组区块数据</div>
         <div class="group-table-wrap">
           <table class="group-table">
             <thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead>
@@ -131,8 +131,17 @@
 
   function renderGroups(groups){
     const body=document.getElementById('groupTableBody');
-    if(!groups || !groups.length){ body.innerHTML='<tr><td colspan="4">等待区块数据</td></tr>'; return; }
-    body.innerHTML=groups.map(g=>`<tr><td>第${g.group}组</td><td>${g.blockNumber ?? '--'}</td><td>单${g.singleCount ?? '--'}</td><td>${(g.numbers||[]).join(' ')||'--'}</td></tr>`).join('');
+    // 固定先建立第1～20组框架；接口有数据后，只填充对应组。
+    const map=new Map((Array.isArray(groups)?groups:[]).map(g=>[Number(g.group),g]));
+    body.innerHTML=Array.from({length:20},(_,i)=>{
+      const n=i+1;
+      const g=map.get(n);
+      const block=g?.blockNumber ?? '--';
+      const single=(g && g.singleCount !== null && g.singleCount !== undefined) ? `单${g.singleCount}` : '--';
+      const nums=Array.isArray(g?.numbers) && g.numbers.length ? g.numbers.join(' ') : '--';
+      const cls=g ? ' has-data' : ' waiting';
+      return `<tr class="group-row-${n}${cls}"><td>第${n}组</td><td>${block}</td><td>${single}</td><td>${nums}</td></tr>`;
+    }).join('');
   }
 
   async function loadDraw(){
