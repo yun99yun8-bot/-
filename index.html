@@ -370,8 +370,32 @@
       loadDraw(); // official-result refresh at 00
     }
   }
-  loadDraw();
-  window.setInterval(loadDraw,500); // responsive pickup with lower overlap/load on Render
+  // V7.1: result display has its own fast path. AI/history failure can no longer freeze official result pickup.
+  var fastBusy=false;
+  function loadFastResult(){
+    if(fastBusy)return; fastBusy=true;
+    var x=new XMLHttpRequest(); x.open('GET','/api/result-fast?t='+Date.now(),true); x.timeout=3500;
+    function done(){fastBusy=false;}
+    x.onreadystatechange=function(){if(x.readyState!==4)return; done(); if(x.status<200||x.status>=300)return;
+      try{var d=JSON.parse(x.responseText); if(!d||!d.ready)return;
+        var c={period:d.period,platformPeriod:d.platformPeriod,block:d.targetBlock,blockNumber:d.targetBlock,numbers:d.numbers,singleCount:d.single};
+        if(!fixedResult || Number(c.block)>=Number(fixedResult.block)){fixedResult=c; paintFixedResult(c);}
+      }catch(e){}
+    };
+    x.onerror=done; x.ontimeout=done; x.onabort=done; x.send(null);
+  }
+  function hardResync(){
+    drawRequestBusy=false; fastBusy=false; pendingAILock=false;
+    tickCountdown(); loadFastResult(); loadDraw();
+  }
+  // iOS suspends page JS while locked/backgrounded. On wake, immediately discard stale timers and resync.
+  document.addEventListener('visibilitychange',function(){if(!document.hidden)hardResync();});
+  window.addEventListener('pageshow',hardResync);
+  window.addEventListener('online',hardResync);
+  window.addEventListener('focus',hardResync);
+  loadDraw(); loadFastResult();
+  window.setInterval(loadDraw,700);
+  window.setInterval(loadFastResult,450);
   tickCountdown(); window.setInterval(tickCountdown,200);
 })();
 </script>

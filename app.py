@@ -728,7 +728,7 @@ def smart_db_worker():
 
 
 def ai_prediction_worker():
-    """Durable backend AI lifecycle with pre-result snapshot + retry persistence."""
+    """Server-owned AI lifecycle; no browser request is required."""
     last_verified_key=None
     while True:
         try:
@@ -753,9 +753,10 @@ def ai_prediction_worker():
                             _ai_summary_cache.update({'key':None,'at':0,'value':None})
                 except Exception:
                     pass
-        except Exception:
-            pass
-        time.sleep(0.75)
+        except Exception as exc:
+            with _runtime_health_lock:
+                _runtime_health['lastAiError']=str(exc)[:300]
+        time.sleep(0.35)
 
 
 def start_worker_once():
@@ -1447,9 +1448,8 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
     now=time.time()
     # Explicit UI=10 lock must be handled BEFORE any summary-cache return.
     # Otherwise a request arriving within the cache TTL can silently miss the only lock event.
-    if official:
-        verify_prediction(date_str,period,official)
-    else:
+    # V7.1: verification is backend-worker responsibility. Never block /api/draw on DB verification.
+    if not official:
         save_prediction_if_ready(date_str,period,groups,target20,ui_countdown)
     with _ai_summary_cache_lock:
         cached=_ai_summary_cache.get('value') if _ai_summary_cache.get('key')==key else None
@@ -1690,7 +1690,7 @@ def draw():
                       'aiPending': len(_pending_ai_predictions),
                       'ai17Ready': bool(ai17),
                       'aiFrozen': bool(ai_info.get('frozen')) if isinstance(ai_info, dict) else False,
-                      'modelVersion': MODEL_VERSION, 'smartDb': dict(_runtime_health), 'aiEngine': 'multi-model-ensemble', 'resultFastPath': True}
+                      'modelVersion': MODEL_VERSION, 'smartDb': dict(_runtime_health), 'aiEngine': 'multi-model-ensemble', 'resultFastPath': True, 'serverOwnedLifecycle': True}
         }
         with _draw_cache_lock:
             _draw_cache = dict(payload)
