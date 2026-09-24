@@ -34,7 +34,7 @@ TRONSCAN_LATEST = 'https://apilist.tronscan.org/api/block/latest'
 CN_TZ = timezone(timedelta(hours=8))
 STATE_FILE = BASE_DIR / 'draw_state.json'
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
-DB_RETENTION_DAYS = 3
+DB_RETENTION_DAYS = 7
 _worker_started = False
 _worker_lock = threading.Lock()
 _db_pool = None
@@ -460,7 +460,7 @@ def cleanup_old_db_rows():
     try:
         with conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM tron_blocks WHERE fetched_at < NOW() - INTERVAL '3 days'")
+                cur.execute("DELETE FROM tron_blocks WHERE fetched_at < NOW() - INTERVAL '7 days'")
     finally:
         db_release(conn)
 
@@ -1464,9 +1464,49 @@ def db_check():
                 pass
 
 
+
+def threshold_gap_stats(rows):
+    """Analyze recurrence gaps from chronological official period rows."""
+    thresholds = {0:200, 1:30, 2:10, 3:7, 4:7, 5:10, 6:30, 7:200}
+    seq=[]
+    for r in reversed(rows):
+        v=r.get('actual_single')
+        if v is None: continue
+        seq.append({'date': r['period_date'].isoformat() if r.get('period_date') else None,
+                    'period': int(r['period_no']), 'single': int(v)})
+    result={}
+    for target in range(8):
+        th=thresholds[target]; positions=[i for i,x in enumerate(seq) if x['single']==target]
+        events=[]; total_intervals=max(0,len(positions)-1)
+        for a,b in zip(positions,positions[1:]):
+            gap=b-a-1
+            if gap>th:
+                middle=seq[a+1:b]
+                events.append({'fromDate':seq[a]['date'],'fromPeriod':seq[a]['period'],
+                               'toDate':seq[b]['date'],'toPeriod':seq[b]['period'],
+                               'gap':gap,'middle':[x['single'] for x in middle]})
+        active=None
+        if positions:
+            gap=len(seq)-1-positions[-1]
+            if gap>th:
+                middle=seq[positions[-1]+1:]
+                active={'fromDate':seq[positions[-1]]['date'],'fromPeriod':seq[positions[-1]]['period'],
+                        'toDate':None,'toPeriod':None,'gap':gap,'middle':[x['single'] for x in middle]}
+        result[str(target)]={'threshold':th,'intervals':total_intervals,'exceeded':len(events),
+                             'rate':round((len(events)/total_intervals*100),2) if total_intervals else 0,
+                             'events':list(reversed(events)),'active':active}
+    return {'samplePeriods':len(seq),'items':result}
+
+
 @app.get('/api/history-summary')
 def history_summary():
-    """Compact period-level history for the History tab."""
+    """Period-level history for the History tab, selectable up to 5000 periods."""
+    allowed_limits = {30, 50, 100, 500, 1000, 5000}
+    try:
+        requested_limit = int(request.args.get('limit', 30))
+    except Exception:
+        requested_limit = 100
+    history_limit = requested_limit if requested_limit in allowed_limits else 30
     conn=db_connect()
     if conn is None:
         return jsonify({'ok':False,'error':'database unavailable'}),503
@@ -1475,8 +1515,13 @@ def history_summary():
             cur.execute("""SELECT p.period_date,p.period_no,p.target_block,p.data_conclusion,p.ai_analysis,
                           p.prediction_top3,p.actual_single,p.created_at,p.verified_at,p.conclusion17,p.conclusion17_mode,b.numbers,b.single_count
                           FROM ai_predictions p LEFT JOIN tron_blocks b ON b.block_number=p.target_block
-                          ORDER BY p.period_date DESC,p.period_no DESC LIMIT 100""")
+                          ORDER BY p.period_date DESC,p.period_no DESC LIMIT %s""", (history_limit,))
             rows=cur.fetchall()
+            cur.execute("""SELECT period_date,period_no,actual_single FROM ai_predictions
+                          WHERE actual_single IS NOT NULL
+                          ORDER BY period_date DESC,period_no DESC LIMIT 5000""")
+            gap_rows=cur.fetchall()
+        gap_stats=threshold_gap_stats(gap_rows)
         out=[]
         for r in rows:
             top=r.get('prediction_top3') or []
@@ -1496,14 +1541,14 @@ def history_summary():
                         'numbers':nums,'hit':hit,'verified':actual is not None})
         date_str, period, _, _ = current_period()
         patterns=pattern_insights(date_str,period,1000)
-        return jsonify({'ok':True,'rows':out,'patterns':patterns})
+        return jsonify({'ok':True,'rows':out,'patterns':patterns,'gapStats':gap_stats,'historyLimit':history_limit,'historyMax':5000})
     finally:
         db_release(conn)
 
 
 @app.get('/api/history')
 def history():
-    """Raw saved block history, limited to the retained three-day database window."""
+    """Raw saved block history. Seven days of blocks are retained so 5000 one-minute periods remain available."""
     try:
         rows = get_db_recent_rows(5000)
         out = []
@@ -1515,7 +1560,7 @@ def history():
                 'singleCount': int(r['single_count']),
                 'savedAt': r['fetched_at'].isoformat() if r.get('fetched_at') else None
             })
-        return jsonify({'ok': True, 'retentionDays': 3, 'count': len(out), 'rows': out})
+        return jsonify({'ok': True, 'retentionDays': DB_RETENTION_DAYS, 'count': len(out), 'rows': out})
     except Exception as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 502
 

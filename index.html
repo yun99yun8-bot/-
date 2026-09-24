@@ -69,9 +69,10 @@
         <div class="group-table-wrap"><table class="group-table"><thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead><tbody id="groupTableBody"><tr><td colspan="4">等待数据</td></tr></tbody></table></div>
       </section>
       <section class="card history-section"><div class="section-title">三、历史AI验证</div><div class="history-status" id="historyModel">正在读取历史模型数据…</div></section>
-      <section class="card history-section"><div class="section-title">四、历史开奖记录</div><div class="history-table-box" id="historyDraws"><div class="history-empty">正在读取历史开奖记录…</div></div></section>
+      <section class="card history-section"><div class="section-title">四、历史开奖记录</div><div class="history-filter"><label for="historyLimitSelect">查看期数：</label><select id="historyLimitSelect"><option value="30" selected>30期</option><option value="50">50期</option><option value="100">100期</option><option value="500">500期</option><option value="1000">1000期</option><option value="5000">5000期</option></select><span id="historyLimitStatus">最多保留5000期</span></div><div class="history-table-box" id="historyDraws"><div class="history-empty">正在读取历史开奖记录…</div></div></section>
       <section class="card history-section"><div class="section-title">五、历史预判记录</div><div class="history-table-box" id="historyPredictions"><div class="history-empty">正在读取历史预判记录…</div></div></section>
-      <section class="card history-section"><div class="section-title">六、AI规律库（滚动1000期）</div><div class="history-table-box" id="patternInsights"><div class="history-empty">正在读取遗漏卡期、长期分布和哈希结构…</div></div></section>
+      <section class="card history-section"><div class="section-title">六、超期遗漏统计</div><div class="history20-note">单3/4 ＞7期，单2/5 ＞10期，单1/6 ＞30期，单0/7 ＞200期。点击类别查看每次超期明细。</div><div id="gapStats" class="prob-grid"><div class="history-empty">正在计算5000期超期记录…</div></div><div id="gapDetail" class="history-table-box" style="display:none;margin-top:10px"></div></section>
+      <section class="card history-section"><div class="section-title">七、AI规律库（滚动1000期）</div><div class="history-table-box" id="patternInsights"><div class="history-empty">正在读取遗漏卡期、长期分布和哈希结构…</div></div></section>
     </main>
   </div>
 <script>
@@ -90,14 +91,17 @@
 
   function text(id,value){var el=document.getElementById(id);if(el)el.textContent=(value===null||value===undefined||value==='')?'--':String(value);}
   var historyBusy=false;
-  function loadHistoryPage(){
+  var historyLimitSelect=document.getElementById('historyLimitSelect');
+  if(historyLimitSelect){historyLimitSelect.onchange=function(){loadHistoryPage(true);};}
+  function loadHistoryPage(force){
     if(historyBusy)return; historyBusy=true;
-    var x=new XMLHttpRequest(); x.open('GET','/api/history-summary?t='+Date.now(),true);
+    var lim=historyLimitSelect?historyLimitSelect.value:'30';
+    var x=new XMLHttpRequest(); x.open('GET','/api/history-summary?limit='+encodeURIComponent(lim)+'&t='+Date.now(),true);
     x.timeout=10000;
-    x.onreadystatechange=function(){if(x.readyState!==4)return;historyBusy=false;if(x.status<200||x.status>=300){text('historyModel','历史数据暂时不可用，保留当前页面数据并自动重试');return;}try{var d=JSON.parse(x.responseText);if(!d.ok){text('historyModel','历史数据暂时不可用，稍后自动重试');return;}renderHistoryPage(d.rows||[],d.patterns||null);}catch(e){text('historyModel','历史数据解析失败，稍后自动重试');}};
+    x.onreadystatechange=function(){if(x.readyState!==4)return;historyBusy=false;if(x.status<200||x.status>=300){text('historyModel','历史数据暂时不可用，保留当前页面数据并自动重试');return;}try{var d=JSON.parse(x.responseText);if(!d.ok){text('historyModel','历史数据暂时不可用，稍后自动重试');return;}renderHistoryPage(d.rows||[],d.patterns||null,d.gapStats||null);text('historyLimitStatus','已读取 '+(d.rows||[]).length+' / '+Number(d.historyLimit||lim)+' 期 · 最多5000期');}catch(e){text('historyModel','历史数据解析失败，稍后自动重试');}};
     x.onerror=function(){historyBusy=false;text('historyModel','历史数据连接暂时中断，稍后自动重试');}; x.ontimeout=x.onerror; x.send(null);
   }
-  function renderHistoryPage(rows,patterns){
+  function renderHistoryPage(rows,patterns,gapStats){
     var verified=rows.filter(function(r){return r.verified;}); var hits=verified.filter(function(r){return r.hit;}).length;
     text('historyModel','历史AI前三验证：'+hits+'/'+verified.length+(verified.length?'（'+(hits/verified.length*100).toFixed(2)+'%）':'')+'；仅统计开奖前已保存的预测。');
     var dh='<table class="group-table history-table"><thead><tr><th>期号</th><th>正式单数</th><th>7个号码</th><th>区块</th></tr></thead><tbody>';
@@ -108,6 +112,13 @@
     }
     if(!rows.length){dh+='<tr><td colspan="4">暂无历史开奖记录</td></tr>';ph+='<tr><td colspan="6">暂无历史AI记录</td></tr>';} dh+='</tbody></table>'; ph+='</tbody></table>';
     document.getElementById('historyDraws').innerHTML=dh; document.getElementById('historyPredictions').innerHTML=ph;
+    var ge=document.getElementById('gapStats');
+    if(ge && gapStats && gapStats.items){
+      var order=[3,4,2,5,1,6,0,7], gh=''; window.__gapStats=gapStats;
+      order.forEach(function(v){var g=gapStats.items[String(v)]||{}; var active=g.active?(' · 当前已'+g.active.gap+'期'):' '; gh+='<button type="button" class="prob-item" style="border:0;cursor:pointer" onclick="window.showGapDetail('+v+')">单'+v+'<small>超过 '+g.threshold+' 期：'+g.exceeded+'次</small><small>历史占比：'+Number(g.rate||0).toFixed(2)+'%'+active+'</small></button>';});
+      ge.innerHTML=gh;
+    }
+    window.showGapDetail=function(v){var box=document.getElementById('gapDetail'), root=window.__gapStats||{}, g=(root.items||{})[String(v)]; if(!box||!g)return; var ev=(g.events||[]).slice(); if(g.active)ev.unshift(g.active); var h='<div class="history20-note"><b>单'+v+'</b>｜阈值：超过'+g.threshold+'期｜已完成超期 '+g.exceeded+' 次｜完成间隔 '+g.intervals+' 次｜超期占比 '+Number(g.rate||0).toFixed(2)+'%</div><table class="group-table"><thead><tr><th>上次出现</th><th>再次出现</th><th>中间遗漏</th><th>中间实际开奖顺序</th></tr></thead><tbody>'; if(!ev.length)h+='<tr><td colspan="4">5000期样本内暂无超过阈值记录</td></tr>'; ev.forEach(function(e){h+='<tr><td>'+String(e.fromPeriod).padStart(4,'0')+'</td><td>'+(e.toPeriod==null?'进行中':String(e.toPeriod).padStart(4,'0'))+'</td><td>'+e.gap+'期</td><td style="white-space:normal;min-width:220px">'+((e.middle||[]).map(function(x){return '单'+x;}).join(' → ')||'--')+'</td></tr>';}); h+='</tbody></table>'; box.innerHTML=h; box.style.display='block'; box.scrollIntoView({behavior:'smooth',block:'nearest'});};
     var pe=document.getElementById('patternInsights');
     if(pe && patterns){
       var dist=patterns.distribution||[], hz=patterns.omissionHazard||{};

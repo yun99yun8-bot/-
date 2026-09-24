@@ -122,3 +122,5 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 #historyContent .group-table td{max-width:240px;overflow:hidden;text-overflow:ellipsis}
 #historyContent #patternInsights .group-table{min-width:720px}
 @media(max-width:420px){#historyContent .card{padding:11px 9px}#historyContent .section-title{font-size:15px}.history-table-box .group-table{font-size:10px}.history-status{font-size:11px;padding:10px 7px}}
+
+.history-filter{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0 12px;font-size:13px;color:#5d6472}.history-filter select{min-width:96px;padding:8px 10px;border:1px solid #d9deea;border-radius:8px;background:#fff;font-size:14px}.history-filter span{font-size:12px;color:#7b8496}
