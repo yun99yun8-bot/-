@@ -59,6 +59,10 @@ _ai_summary_cache = {'key': None, 'at': 0, 'value': None}
 _ai_summary_cache_lock = threading.Lock()
 _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
+_runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0}
+_runtime_health_lock = threading.Lock()
+MODEL_VERSION = 'v6-smartdb-1'
+
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
 
@@ -380,6 +384,34 @@ def init_db():
                 cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS conclusion17 SMALLINT")
                 cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS conclusion17_mode TEXT")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_predictions_date ON ai_predictions(period_date DESC, period_no DESC)")
+                cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS model_version TEXT")
+                cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS locked_at TIMESTAMPTZ")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS period_groups (
+                        period_key TEXT NOT NULL,
+                        period_date DATE NOT NULL,
+                        period_no INTEGER NOT NULL,
+                        group_no SMALLINT NOT NULL,
+                        target_block BIGINT NOT NULL,
+                        block_number BIGINT NOT NULL,
+                        block_hash TEXT NOT NULL,
+                        numbers JSONB NOT NULL,
+                        single_count SMALLINT NOT NULL,
+                        captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY(period_key, group_no)
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_period_groups_period ON period_groups(period_date DESC, period_no DESC)")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS system_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        period_key TEXT,
+                        detail JSONB,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_system_events_created ON system_events(created_at DESC)")
         return True
     finally:
         db_release(conn)
@@ -600,6 +632,98 @@ def tron_ingest_worker():
         # result publication to database latency.
         time.sleep(0.5)
 
+def record_system_event(event_type, period_key=None, detail=None):
+    conn=None
+    try:
+        conn=db_connect(retries=0)
+        if conn is None:return
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO system_events(event_type,period_key,detail) VALUES(%s,%s,%s::jsonb)",
+                            (str(event_type),period_key,json.dumps(detail or {})))
+    except Exception:
+        pass
+    finally:
+        if conn is not None: db_release(conn)
+
+
+def persist_period_groups(date_str,period,groups,target20):
+    """Materialize all observed group rows by period, independently of raw block retention."""
+    if not groups:return 0
+    key=f'{date_str}:{int(period):04d}'; rows=[]
+    for gtxt,row in groups.items():
+        try:
+            g=int(gtxt)
+            if not (1 <= g <= 20): continue
+            rows.append((key,date_str,int(period),g,int(target20),int(row['blockNumber']),
+                         row['block'],json.dumps(row['numbers']),int(row['singleCount'])))
+        except Exception:
+            continue
+    if not rows:return 0
+    conn=db_connect()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.executemany("""
+                    INSERT INTO period_groups(period_key,period_date,period_no,group_no,target_block,block_number,block_hash,numbers,single_count)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                    ON CONFLICT(period_key,group_no) DO UPDATE SET
+                      target_block=EXCLUDED.target_block, block_number=EXCLUDED.block_number,
+                      block_hash=EXCLUDED.block_hash, numbers=EXCLUDED.numbers,
+                      single_count=EXCLUDED.single_count
+                """,rows)
+        return len(rows)
+    finally: db_release(conn)
+
+
+def repair_recent_periods(limit=6):
+    """Self-heal missing period_groups and verification from retained raw blocks."""
+    global _runtime_health
+    date_str,period,_,_=current_period(); repaired=0
+    now_idx=period_index(date_str,period)
+    for off in range(0,int(limit)):
+        idx=now_idx-off; ordinal,zero=divmod(idx,1440); d=date.fromordinal(ordinal); p=zero+1
+        ds=d.strftime('%Y-%m-%d'); target=period_target_block(ds,p)
+        wanted=[target-(20-g) for g in range(1,21)]
+        try: rows=get_db_blocks(wanted)
+        except Exception: rows={}
+        groups={}
+        for g,bn in enumerate(wanted,1):
+            row=rows.get(bn)
+            if row:
+                nums=row['numbers'] if isinstance(row['numbers'],list) else json.loads(row['numbers'])
+                groups[str(g)]={'group':g,'blockNumber':bn,'block':row['block_hash'],
+                                'numbers':nums,'singleCount':int(row['single_count'])}
+        if groups:
+            try: persist_period_groups(ds,p,groups,target); repaired += 1
+            except Exception: pass
+        if groups.get('20'):
+            try: verify_prediction(ds,p,groups['20'])
+            except Exception: pass
+    with _runtime_health_lock:
+        _runtime_health['lastRepairAt']=datetime.now(CN_TZ).isoformat(timespec='seconds')
+        _runtime_health['repairCount']=int(_runtime_health.get('repairCount') or 0)+repaired
+    return repaired
+
+
+def smart_db_worker():
+    """Continuously materialize current period and repair recent holes."""
+    last_repair=0
+    while True:
+        try:
+            ds,p,_,_=current_period()
+            groups,target=collect_groups_live(ds,p)
+            if groups:
+                persist_period_groups(ds,p,groups,target)
+            if time.time()-last_repair > 30:
+                last_repair=time.time()
+                repair_recent_periods(6)
+        except Exception as exc:
+            with _runtime_health_lock:
+                _runtime_health['lastDbError']=str(exc)[:300]
+        time.sleep(1.0)
+
+
 def ai_prediction_worker():
     """Durable backend AI lifecycle with pre-result snapshot + retry persistence."""
     last_verified_key=None
@@ -643,6 +767,7 @@ def start_worker_once():
         threading.Thread(target=tron_ingest_worker, name='tron-ingest', daemon=True).start()
         threading.Thread(target=target_result_fast_worker, name='target-result-fast', daemon=True).start()
         threading.Thread(target=ai_prediction_worker, name='ai-prediction', daemon=True).start()
+        threading.Thread(target=smart_db_worker, name='smart-db', daemon=True).start()
 
 
 def collect_period_groups(date_str, period, latest_number, state):
@@ -1149,8 +1274,8 @@ def _persist_ai_payload(payload):
         with conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size,conclusion17,conclusion17_mode)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size,conclusion17,conclusion17_mode,model_version,locked_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                     ON CONFLICT(period_key) DO UPDATE SET
                       data_conclusion=COALESCE(ai_predictions.data_conclusion,EXCLUDED.data_conclusion),
                       ai_analysis=COALESCE(ai_predictions.ai_analysis,EXCLUDED.ai_analysis),
@@ -1160,7 +1285,7 @@ def _persist_ai_payload(payload):
                       conclusion17_mode=COALESCE(ai_predictions.conclusion17_mode,EXCLUDED.conclusion17_mode)
                 """,(payload['key'],payload['date'],payload['period'],payload['target20'],
                      payload['dataConclusion'],payload['ai'],json.dumps(payload['top3']),
-                     payload['sampleSize'],payload.get('c17'),payload.get('c17Mode')))
+                     payload['sampleSize'],payload.get('c17'),payload.get('c17Mode'),MODEL_VERSION))
     finally:
         db_release(conn)
     return True
@@ -1215,8 +1340,10 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
         _persist_ai_payload(payload)
         with _pending_ai_lock:
             _pending_ai_predictions.pop(key,None)
-    except Exception:
-        pass
+    except Exception as exc:
+        with _runtime_health_lock:
+            _runtime_health['lastAiError']=str(exc)[:300]
+        record_system_event('ai_persist_retry',key,{'error':str(exc)[:300]})
     with _ai_summary_cache_lock:
         _ai_summary_cache.update({'key':None,'at':0,'value':None})
     return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True,
@@ -1433,6 +1560,11 @@ def draw():
             raise RuntimeError('DATABASE_URL 未配置')
         groups, target20 = collect_groups_live(date_str, period)
         official = groups.get('20')
+        try:
+            persist_period_groups(date_str,period,groups,target20)
+        except Exception as exc:
+            with _runtime_health_lock:
+                _runtime_health['lastDbError']=str(exc)[:300]
         if official:
             prior = dict(state)
             state = {
@@ -1489,7 +1621,8 @@ def draw():
             'debug': {'targetBlock': target20, 'fastTarget': dict(_fast_diag),
                       'aiPending': len(_pending_ai_predictions),
                       'ai17Ready': bool(ai17),
-                      'aiFrozen': bool(ai_info.get('frozen')) if isinstance(ai_info, dict) else False}
+                      'aiFrozen': bool(ai_info.get('frozen')) if isinstance(ai_info, dict) else False,
+                      'modelVersion': MODEL_VERSION, 'smartDb': dict(_runtime_health)}
         }
         with _draw_cache_lock:
             _draw_cache = dict(payload)
@@ -1531,6 +1664,24 @@ def draw():
             }
             return jsonify(payload)
         return jsonify({'ok': False, 'databaseStatus': 'reconnecting', 'error': '数据库暂时不可用，正在自动重连'}), 503
+
+
+@app.get('/api/system-health')
+def system_health():
+    ds,p,ps,platform=current_period()
+    conn=None; counts={'periodGroups':0,'predictions':0,'events':0}
+    try:
+        conn=db_connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM period_groups"); counts['periodGroups']=int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM ai_predictions"); counts['predictions']=int(cur.fetchone()[0])
+            cur.execute("SELECT COUNT(*) FROM system_events"); counts['events']=int(cur.fetchone()[0])
+        return jsonify({'ok':True,'period':ps,'platformPeriod':platform,'modelVersion':MODEL_VERSION,
+                        'counts':counts,'runtime':dict(_runtime_health)})
+    except Exception as exc:
+        return jsonify({'ok':False,'error':type(exc).__name__,'runtime':dict(_runtime_health)}),503
+    finally:
+        if conn is not None: db_release(conn)
 
 
 @app.get('/api/db-check')

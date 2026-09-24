@@ -141,3 +141,14 @@ AI statistical analysis module:
 - 数据库暂时未落盘时，内存 pending 快照也直接作为 frozen AI 返回给前端，避免页面继续显示“分析中”。
 - 第20组出现以后仍禁止新建预测，避免用开奖结果倒推预测。
 - debug 新增 ai17Ready / aiFrozen，方便线上直接判断建档是否成功。
+
+
+## V6 SmartDB 架构
+- 新增 period_groups：按“期次+组号”永久物化每期1~20组，不再只依赖原始区块表推算。
+- 新增 system_events：记录关键后台异常/重试事件，减少静默失败。
+- AI记录新增 model_version / locked_at，历史预测可区分算法版本与开奖前锁定时间。
+- 新增 smart-db 后台线程：持续保存当前期组数据，并每30秒自愈最近6期的缺失组/验证状态。
+- /api/draw 请求路径也同步物化当前组数据，形成双保险。
+- 新增 /api/system-health：查看 periodGroups、predictions、events、模型版本和最近后台错误。
+- V6保留V5的17/17强制建档与pending重试机制。
+- 数据库“智能化”用于完整性、恢复、统计和模型验证，不代表区块哈希可被可靠预测。
