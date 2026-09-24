@@ -15,3 +15,13 @@ Fix9 changes:
 - Frontend refresh interval reduced from 15s to 3s.
 - Removed the redundant blocking second fetch for group 20.
 - Existing result, omission, and statistics rules are preserved.
+
+
+DB3 realtime architecture:
+- Server background collector checks TRON every 1 second and saves each new block once to PostgreSQL.
+- PostgreSQL block_number is the primary key, preventing duplicate rows.
+- Rows older than 3 days are deleted hourly.
+- /api/draw reads PostgreSQL only; the browser does not query TRON.
+- Frontend refresh interval is 1 second.
+- /api/history exposes retained saved rows for later history UI work.
+- Requires Render environment variable DATABASE_URL (Internal Database URL).

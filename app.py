@@ -2,8 +2,17 @@ from pathlib import Path
 from flask import Flask, Response, jsonify
 from urllib.request import urlopen, Request
 import json
+import os
+import time
+import threading
 from datetime import datetime, timezone, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except Exception:
+    psycopg2 = None
 
 BASE_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path='')
@@ -20,6 +29,10 @@ TRONSCAN_LATEST = 'https://apilist.tronscan.org/api/block/latest'
 
 CN_TZ = timezone(timedelta(hours=8))
 STATE_FILE = BASE_DIR / 'draw_state.json'
+DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
+DB_RETENTION_DAYS = 3
+_worker_started = False
+_worker_lock = threading.Lock()
 
 
 def current_period():
@@ -143,9 +156,157 @@ def period_target_block(date_str, period):
     For the current/live range we therefore anchor to 1001 and advance +20
     per period until the user reports another adjustment.
     """
-    if date_str == '2026-09-24':
-        return 86522304 + (int(period) - 1001) * 20
-    return None
+    # Continuous +20 calibration from the confirmed anchor. If the platform
+    # makes another exceptional +18 adjustment, update this calibration.
+    anchor_idx = period_index('2026-09-24', 1001)
+    return 86522304 + (period_index(date_str, int(period)) - anchor_idx) * 20
+
+
+def db_connect():
+    if not DATABASE_URL or psycopg2 is None:
+        return None
+    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
+
+
+def init_db():
+    conn = db_connect()
+    if conn is None:
+        return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS tron_blocks (
+                        block_number BIGINT PRIMARY KEY,
+                        block_hash TEXT NOT NULL,
+                        block_time TIMESTAMPTZ,
+                        numbers JSONB NOT NULL,
+                        single_count SMALLINT NOT NULL,
+                        fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_tron_blocks_fetched_at ON tron_blocks(fetched_at DESC)")
+        return True
+    finally:
+        conn.close()
+
+
+def save_block_to_db(block):
+    nums = calc_numbers(block['block'])
+    ts = block.get('timestamp')
+    block_time = datetime.fromtimestamp(ts / 1000, timezone.utc) if ts else None
+    conn = db_connect()
+    if conn is None:
+        return
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO tron_blocks(block_number, block_hash, block_time, numbers, single_count)
+                    VALUES (%s,%s,%s,%s::jsonb,%s)
+                    ON CONFLICT (block_number) DO UPDATE SET
+                      block_hash=EXCLUDED.block_hash,
+                      block_time=EXCLUDED.block_time,
+                      numbers=EXCLUDED.numbers,
+                      single_count=EXCLUDED.single_count
+                """, (int(block['number']), block['block'], block_time, json.dumps([f'{n:02d}' for n in nums]), calc_single_count(nums)))
+    finally:
+        conn.close()
+
+
+def cleanup_old_db_rows():
+    conn = db_connect()
+    if conn is None:
+        return
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM tron_blocks WHERE fetched_at < NOW() - INTERVAL '3 days'")
+    finally:
+        conn.close()
+
+
+def get_db_blocks(numbers):
+    nums = sorted({int(x) for x in numbers})
+    if not nums:
+        return {}
+    conn = db_connect()
+    if conn is None:
+        return {}
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT block_number, block_hash, numbers, single_count FROM tron_blocks WHERE block_number = ANY(%s)", (nums,))
+            return {int(r['block_number']): r for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def get_db_latest_number():
+    conn = db_connect()
+    if conn is None:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(block_number) FROM tron_blocks")
+            row = cur.fetchone()
+            return int(row[0]) if row and row[0] is not None else None
+    finally:
+        conn.close()
+
+
+def get_db_recent_rows(limit=2000):
+    conn = db_connect()
+    if conn is None:
+        return []
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT block_number, block_hash, block_time, numbers, single_count, fetched_at FROM tron_blocks ORDER BY block_number DESC LIMIT %s", (int(limit),))
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def tron_ingest_worker():
+    """Server-side collector. It runs even when no browser is open."""
+    try:
+        init_db()
+    except Exception:
+        pass
+    last_cleanup = 0
+    while True:
+        try:
+            latest = fetch_latest_block()
+            db_latest = get_db_latest_number()
+            # First start: backfill enough blocks to cover several platform rounds.
+            start = max(int(latest['number']) - 79, 0) if db_latest is None else db_latest + 1
+            end = int(latest['number'])
+            # Avoid a huge catch-up burst after downtime; history is only 3 days and
+            # future polls continue filling forward.
+            if end - start > 399:
+                start = end - 399
+            for n in range(start, end + 1):
+                try:
+                    block = latest if n == end else fetch_block_by_number(n)
+                    save_block_to_db(block)
+                except Exception:
+                    continue
+            if time.time() - last_cleanup > 3600:
+                cleanup_old_db_rows()
+                last_cleanup = time.time()
+        except Exception:
+            pass
+        time.sleep(1)
+
+
+def start_worker_once():
+    global _worker_started
+    if not DATABASE_URL or psycopg2 is None:
+        return
+    with _worker_lock:
+        if _worker_started:
+            return
+        _worker_started = True
+        threading.Thread(target=tron_ingest_worker, name='tron-ingest', daemon=True).start()
 
 
 def collect_period_groups(date_str, period, latest_number, state):
@@ -208,6 +369,39 @@ def collect_period_groups(date_str, period, latest_number, state):
                     pass
 
     return groups, target20
+
+def collect_groups_from_db(date_str, period):
+    target20 = period_target_block(date_str, period)
+    wanted = [target20 - (20 - g) for g in range(1, 21)]
+    rows = get_db_blocks(wanted)
+    groups = {}
+    for g, bn in enumerate(wanted, start=1):
+        row = rows.get(bn)
+        if row:
+            nums = row['numbers'] if isinstance(row['numbers'], list) else json.loads(row['numbers'])
+            groups[str(g)] = {
+                'group': g, 'blockNumber': bn, 'block': row['block_hash'],
+                'numbers': nums, 'singleCount': int(row['single_count'])
+            }
+    return groups, target20
+
+
+def build_recent_official_history(date_str, period, count=20):
+    history = []
+    idx_now = period_index(date_str, period)
+    for offset in range(count - 1, -1, -1):
+        idx = idx_now - offset
+        ordinal, zero = divmod(idx, 1440)
+        d = date.fromordinal(ordinal)
+        p = zero + 1
+        target = period_target_block(d.strftime('%Y-%m-%d'), p)
+        rows = get_db_blocks([target])
+        row = rows.get(target)
+        if row:
+            pp = d.strftime('%y%m%d') + f'{p:04d}'
+            history.append({'platformPeriod': pp, 'period': f'{p:04d}', 'blockNumber': target, 'singleCount': int(row['single_count'])})
+    return history
+
 
 def stats_from_groups(groups):
     """Use only groups 1-18 of ONE 20-group round.
@@ -337,134 +531,69 @@ def style():
 
 @app.get('/api/draw')
 def draw():
+    """Frontend reads database only. TRON fetching is done by the server worker."""
     date_str, period, period_str, platform_period = current_period()
     state = read_state() or {}
-
     try:
-        latest = fetch_latest_block()
-
-        # A new platform period starts a completely new 20-group round.
-        # Keep the confirmed result/history/omission, but never carry the
-        # previous period's group 1-20 cache into the next period's stats.
-        current_key = f'{date_str}:{period_str}'
-        state_group_key = state.get('groupPeriodKey')
-        working_state = dict(state)
-        if state_group_key != current_key:
-            working_state['groups'] = {}
-            working_state['groupPeriodKey'] = current_key
-
-        groups, target20 = collect_period_groups(date_str, period, latest['number'], working_state)
-
-        # Official result = group 20. collect_period_groups prioritizes this
-        # row, so do not make a second blocking network request here.
-        official = None
-        if target20 is not None and target20 <= latest['number']:
-            key20 = '20'
-            candidate20 = groups.get(key20)
-            if isinstance(candidate20, dict) and candidate20.get('blockNumber') == target20 and candidate20.get('numbers'):
-                official = candidate20
-
-        # Preserve the last confirmed official result until the next one exists.
-        if official:
-            # Update omission exactly once when a new official period is confirmed.
-            prior = dict(state)
-            state = {
-                **prior,
-                'date': date_str,
-                'period': period_str,
-                'platformPeriod': platform_period,
-                'block': official['block'],
-                'blockNumber': official['blockNumber'],
-                'numbers': official['numbers'],
-                'singleCount': official['singleCount'],
-                'groups': groups,
-                'groupPeriodKey': current_key,
-                'source': 'TRONGrid / getblockbynum'
-            }
-            state['omission'] = update_omission(state, official)
-            update_result_history(state, official)
-            write_state(state)
-        else:
-            # Keep same-period group cache even when group 20 is not ready.
-            state.update({'date': date_str, 'period': period_str, 'platformPeriod': platform_period, 'groups': groups, 'groupPeriodKey': current_key})
-            write_state(state)
-
-        # If there is no current official result, return the prior published result
-        # fields while still exposing current-period statistics when available.
-        current_stats = stats_from_groups(groups)
-        # Return dedicated result fields as well as the legacy state fields.
-        # This keeps the frontend stable even when the current period is still
-        # waiting for group 20 or when an older confirmed result is being kept.
-        # Build one authoritative result object. Prefer confirmed group 20, then
-        # the persisted confirmed result. This prevents the UI from losing the
-        # numbers when the current-period cache is refreshed.
-        result_obj = None
-        g20 = groups.get('20') if isinstance(groups, dict) else None
-        if isinstance(g20, dict) and isinstance(g20.get('numbers'), list) and len(g20.get('numbers')) == 7:
-            result_obj = g20
-        elif isinstance(state.get('numbers'), list) and len(state.get('numbers')) == 7:
-            result_obj = {
-                'numbers': state.get('numbers'),
-                'singleCount': state.get('singleCount'),
-                'blockNumber': state.get('blockNumber'),
-                'block': state.get('block'),
-                'platformPeriod': state.get('platformPeriod'),
-            }
-        saved_numbers = result_obj.get('numbers', []) if result_obj else []
-        saved_omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
-        saved_omission = {str(i): int(saved_omission.get(str(i), 0) or 0) for i in range(8)}
-        response = {
-            **state,
-            'platformPeriod': platform_period,
-            'currentPeriod': period_str,
-            'targetResultBlock': target20,
-            'officialReady': bool(official),
-            'resultNumbers': saved_numbers,
-            'resultSingleCount': result_obj.get('singleCount') if result_obj else None,
-            'resultBlockNumber': result_obj.get('blockNumber') if result_obj else None,
-            'resultPlatformPeriod': result_obj.get('platformPeriod') if result_obj and result_obj.get('platformPeriod') else (state.get('platformPeriod') if saved_numbers else None),
-            'result': result_obj,
-            'omission': saved_omission,
-            'resultHistory': state.get('resultHistory', []) if isinstance(state.get('resultHistory'), list) else [],
-            'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
-            'dataStats': current_stats,
-            'ok': True,
-            'isNew': bool(official),
-            'debug': {'latestBlock': latest.get('number'), 'targetBlock': target20, 'officialBlock': official.get('blockNumber') if official else None, 'officialReady': bool(official)}
-        }
-        if not official and not state.get('numbers'):
-            response['waitingForNewResult'] = True
-        return jsonify(response)
+        if DATABASE_URL:
+            groups, target20 = collect_groups_from_db(date_str, period)
+            official = groups.get('20')
+            if official:
+                prior = dict(state)
+                state = {
+                    **prior, 'date': date_str, 'period': period_str,
+                    'platformPeriod': platform_period, 'block': official['block'],
+                    'blockNumber': official['blockNumber'], 'numbers': official['numbers'],
+                    'singleCount': official['singleCount'], 'groups': groups,
+                    'groupPeriodKey': f'{date_str}:{period_str}', 'source': 'PostgreSQL / backend collector'
+                }
+                state['omission'] = update_omission(state, official)
+                write_state(state)
+            result_obj = official
+            if result_obj is None and isinstance(state.get('numbers'), list) and len(state.get('numbers')) == 7:
+                result_obj = {'numbers': state['numbers'], 'singleCount': state.get('singleCount'), 'blockNumber': state.get('blockNumber'), 'block': state.get('block'), 'platformPeriod': state.get('platformPeriod')}
+            omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
+            omission = {str(i): int(omission.get(str(i), 0) or 0) for i in range(8)}
+            history = build_recent_official_history(date_str, period, 20)
+            return jsonify({
+                **state, 'platformPeriod': platform_period, 'currentPeriod': period_str,
+                'targetResultBlock': target20, 'officialReady': bool(official),
+                'resultNumbers': result_obj.get('numbers', []) if result_obj else [],
+                'resultSingleCount': result_obj.get('singleCount') if result_obj else None,
+                'resultBlockNumber': result_obj.get('blockNumber') if result_obj else None,
+                'resultPlatformPeriod': result_obj.get('platformPeriod') if result_obj and result_obj.get('platformPeriod') else state.get('platformPeriod'),
+                'result': result_obj, 'omission': omission, 'resultHistory': history,
+                'groups': sorted(groups.values(), key=lambda x: x.get('group', 0)),
+                'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
+                'storage': {'database': True, 'retentionDays': DB_RETENTION_DAYS, 'frontendSource': 'PostgreSQL'},
+                'debug': {'databaseLatestBlock': get_db_latest_number(), 'targetBlock': target20}
+            })
+        # Safe fallback for local runs without DATABASE_URL.
+        return jsonify({'ok': False, 'error': 'DATABASE_URL 未配置'}), 503
     except Exception as exc:
-        # Never erase a confirmed result on a transient API error.
-        if state.get('numbers'):
-            saved_omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
-            saved_omission = {str(i): int(saved_omission.get(str(i), 0) or 0) for i in range(8)}
-            response = {
-                **state,
-                'platformPeriod': platform_period,
-                'currentPeriod': period_str,
-                'resultNumbers': state.get('numbers', []),
-                'resultSingleCount': state.get('singleCount'),
-                'resultBlockNumber': state.get('blockNumber'),
-                'resultPlatformPeriod': state.get('platformPeriod'),
-                'result': {
-                    'numbers': state.get('numbers', []),
-                    'singleCount': state.get('singleCount'),
-                    'blockNumber': state.get('blockNumber'),
-                    'block': state.get('block'),
-                    'platformPeriod': state.get('platformPeriod')
-                },
-                'omission': saved_omission,
-                'dataStats': stats_from_groups(state.get('groups', {})),
-                'ok': True,
-                'isNew': False,
-                'waitingForNewResult': True,
-                'error': str(exc)
-            }
-            return jsonify(response)
-        return jsonify({'ok': False, 'error': str(exc), 'debug': {'date': date_str, 'period': period_str, 'targetBlock': target20 if 'target20' in locals() else None}}), 502
+        return jsonify({'ok': False, 'error': str(exc)}), 502
 
+
+@app.get('/api/history')
+def history():
+    """Raw saved block history, limited to the retained three-day database window."""
+    try:
+        rows = get_db_recent_rows(5000)
+        out = []
+        for r in rows:
+            out.append({
+                'blockNumber': int(r['block_number']), 'block': r['block_hash'],
+                'timestamp': r['block_time'].isoformat() if r.get('block_time') else None,
+                'numbers': r['numbers'] if isinstance(r['numbers'], list) else json.loads(r['numbers']),
+                'singleCount': int(r['single_count']),
+                'savedAt': r['fetched_at'].isoformat() if r.get('fetched_at') else None
+            })
+        return jsonify({'ok': True, 'retentionDays': 3, 'count': len(out), 'rows': out})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 502
+
+
+start_worker_once()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
