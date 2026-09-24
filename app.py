@@ -62,7 +62,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.3-exploratory-multidimensional-ai-1'
+MODEL_VERSION = 'v9.3.1-result-single-display-fix-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -381,6 +381,30 @@ def calc_numbers(block_hash):
 
 def calc_single_count(numbers):
     return sum(int(n) % 2 for n in numbers)
+
+
+def previous_official_result(date_str, period, lookback=3):
+    """Bootstrap the home result from confirmed prior group-20 blocks."""
+    idx=period_index(date_str,period)
+    candidates=[]
+    for off in range(1,int(lookback)+1):
+        ordinal,zero=divmod(idx-off,1440)
+        d=date.fromordinal(ordinal)
+        ds=d.strftime('%Y-%m-%d'); p=zero+1
+        candidates.append((ds,p,period_target_block(ds,p)))
+    rows=get_db_blocks([x[2] for x in candidates])
+    for ds,p,target in candidates:
+        row=rows.get(target)
+        if not row: continue
+        nums=row.get('numbers')
+        if isinstance(nums,str):
+            try: nums=json.loads(nums)
+            except (TypeError,ValueError): continue
+        if not isinstance(nums,list) or len(nums)!=7: continue
+        return {'numbers':nums,'singleCount':calc_single_count(nums),
+                'blockNumber':target,'block':row.get('block_hash'),
+                'platformPeriod':date.fromisoformat(ds).strftime('%y%m%d')+f'{p:04d}'}
+    return None
 
 
 def period_target_block(date_str, period):
@@ -2387,6 +2411,11 @@ def draw():
         result_obj = official
         if result_obj is None and isinstance(state.get('numbers'), list) and len(state.get('numbers')) == 7:
             result_obj = {'numbers': state['numbers'], 'singleCount': state.get('singleCount'), 'blockNumber': state.get('blockNumber'), 'block': state.get('block'), 'platformPeriod': state.get('platformPeriod')}
+        if result_obj is None:
+            try: result_obj=previous_official_result(date_str,period)
+            except Exception: result_obj=None
+        if result_obj and isinstance(result_obj.get('numbers'),list) and len(result_obj['numbers'])==7:
+            result_obj['singleCount']=calc_single_count(result_obj['numbers'])
         durable_omission = None
         try: durable_omission = get_omission_runtime()
         except Exception: durable_omission = None
@@ -2497,12 +2526,23 @@ def result_fast():
         except Exception:
             row=None
     if not row:
+        try: previous=previous_official_result(ds,p)
+        except Exception: previous=None
+        if previous:
+            return jsonify({'ready':True,'period':str(previous['platformPeriod'])[-4:],
+                            'platformPeriod':previous['platformPeriod'],
+                            'targetBlock':previous['blockNumber'],
+                            'numbers':previous['numbers'],
+                            'single':previous['singleCount'],
+                            'previousResult':True})
         return jsonify({'ready':False,'period':ps,'platformPeriod':platform,'targetBlock':target})
     nums=row.get('numbers')
     if isinstance(nums,str):
         try: nums=json.loads(nums)
         except Exception: nums=[]
-    single=int(row.get('singleCount',row.get('single_count',0)))
+    if not isinstance(nums,list) or len(nums)!=7:
+        return jsonify({'ready':False,'period':ps,'platformPeriod':platform,'targetBlock':target})
+    single=calc_single_count(nums)
     return jsonify({'ready':True,'period':ps,'platformPeriod':platform,'targetBlock':target,
                     'blockHash':row.get('block',row.get('block_hash')),
                     'numbers':nums,'single':single,'singleText':f'单{single}'})

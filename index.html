@@ -18,7 +18,7 @@
         <div class="result-head">
           <div class="section-title result-title-line">开奖结果 <span class="countdown" id="countdown">--</span></div><div class="home-live-status" id="homeLiveStatus">实时数据连接中…</div>
           <div class="draw-meta">
-            <span class="single-badge">单<strong id="singleValue">--</strong></span>
+            <span class="single-badge"><strong id="singleValue">待开奖</strong></span>
             <span class="period-badge">第 <strong id="periodValue">0000000000</strong> 期<br><small>区块：<span id="blockValue">--</span></small></span>
           </div>
         </div>
@@ -292,18 +292,39 @@
   }
   var fixedResult=null;
   var lastAcceptedResultPeriod='';
+  function singleFromNumbers(nums){
+    if(!Array.isArray(nums)||nums.length!==7)return null;
+    var count=0;
+    for(var i=0;i<7;i++){
+      var raw=String(nums[i]);
+      if(!/^\d{1,2}$/.test(raw))return null;
+      var n=Number(raw);
+      if(!Number.isInteger(n)||n<1||n>49)return null;
+      count+=n%2;
+    }
+    return count;
+  }
+  function checkedSingle(value,nums){
+    var calculated=singleFromNumbers(nums);
+    if(calculated===null)return null;
+    var supplied=Number(value);
+    return value!=null && value!=='' && Number.isInteger(supplied) && supplied===calculated?supplied:calculated;
+  }
   function candidateResult(data){
     var r=(data.result&&Array.isArray(data.result.numbers))?data.result:null;
     var nums=r?r.numbers:(Array.isArray(data.resultNumbers)?data.resultNumbers:[]);
     var period=(r&&r.platformPeriod)||data.resultPlatformPeriod||'';
-    var single=r&&r.singleCount!=null?r.singleCount:data.resultSingleCount;
+    var single=checkedSingle(r&&r.singleCount!=null?r.singleCount:data.resultSingleCount,nums);
     var block=r&&r.blockNumber!=null?r.blockNumber:data.resultBlockNumber;
     if(!Array.isArray(nums)||nums.length!==7||single==null||block==null||!period)return null;
     return {period:String(period),single:single,block:block,numbers:nums.slice(0,7)};
   }
   function paintFixedResult(r){
     if(!r)return;
-    text('periodValue',r.period); text('singleValue',r.single); text('blockValue',r.block);
+    var single=checkedSingle(r.single,r.numbers);
+    if(single===null)return;
+    r.single=single;
+    text('periodValue',r.period); text('singleValue','单'+single); text('blockValue',r.block);
     var boxes=document.querySelectorAll('[data-result]');
     for(var i=0;i<boxes.length;i++) boxes[i].textContent=r.numbers[i]!=null?r.numbers[i]:'--';
   }
@@ -397,8 +418,8 @@
     function done(){if(activeFastXHR===x)activeFastXHR=null;fastBusy=false;}
     x.onreadystatechange=function(){if(x.readyState!==4)return; done(); if(x.status<200||x.status>=300)return;
       try{var d=JSON.parse(x.responseText); lastFastSuccess=Date.now(); if(!d||!d.ready)return;
-        var c={period:d.period,platformPeriod:d.platformPeriod,block:d.targetBlock,blockNumber:d.targetBlock,numbers:d.numbers,singleCount:d.single};
-        if(!fixedResult || Number(c.block)>=Number(fixedResult.block)){fixedResult=c; paintFixedResult(c);}
+        var c={period:d.period,platformPeriod:d.platformPeriod,block:d.targetBlock,blockNumber:d.targetBlock,numbers:d.numbers,singleCount:checkedSingle(d.single,d.numbers)};
+        if(c.singleCount!==null && (!fixedResult || Number(c.block)>=Number(fixedResult.block))){fixedResult={period:c.platformPeriod,block:c.block,numbers:c.numbers,single:c.singleCount};paintFixedResult(fixedResult);}
       }catch(e){}
     };
     x.onerror=done; x.ontimeout=done; x.onabort=done; x.send(null);
