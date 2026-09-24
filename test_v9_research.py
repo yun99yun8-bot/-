@@ -11,7 +11,7 @@ from pathlib import Path
 source = ast.parse(Path(__file__).with_name('app.py').read_text())
 names = {'_norm_scores', '_candidate_rank', 'research_model_performance',
          '_hash_context_scores', '_relation_scores', 'v9_research_ensemble',
-         'should_poll_target'}
+         'should_poll_target', 'outside_candidate'}
 module = ast.Module(body=[n for n in source.body if isinstance(n, ast.FunctionDef)
                           and n.name in names], type_ignores=[])
 scope = {'json': json, 'RealDictCursor': object()}
@@ -32,6 +32,12 @@ class Connection:
 
 
 class ResearchTests(unittest.TestCase):
+    def test_outside_candidate_is_independent_of_formal_top3(self):
+        scores={'0':1.0,'1':6.0,'2':17.0,'3':26.0,'4':28.0,
+                '5':18.0,'6':3.0,'7':1.0}
+        self.assertEqual(scope['outside_candidate'](scores),{'single':5,'score':18.0})
+        self.assertIsNone(scope['outside_candidate']({}))
+
     def test_target_lookup_starts_at_g17_or_final_twelve_seconds(self):
         should_poll=scope['should_poll_target']
         self.assertFalse(should_poll(96,100,42))

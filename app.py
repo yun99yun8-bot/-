@@ -62,7 +62,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.3.2-target-fetch-efficiency-1'
+MODEL_VERSION = 'v9.3.4-multiclass-visibility-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -1898,6 +1898,17 @@ def _candidate_rank(score_map):
     return sorted(range(8), key=lambda i:(-float(score_map.get(i,0.0)), i))
 
 
+def outside_candidate(score_map):
+    """Highest scored category outside 3/4, reported separately from Top3."""
+    if not isinstance(score_map,dict) or not score_map:return None
+    try: scores={int(k):float(v) for k,v in score_map.items()}
+    except (TypeError,ValueError): return None
+    eligible=[i for i in (0,1,2,5,6,7) if i in scores]
+    if not eligible:return None
+    pick=min(eligible,key=lambda i:(-scores[i],i))
+    return {'single':pick,'score':round(scores[pick],2)}
+
+
 def research_model_performance(limit=500):
     """Score candidate models only on predictions that were locked before results.
 
@@ -2301,6 +2312,7 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
         scores=ensemble_detail['scores']
     decision={'edgeStatus':research.get('edgeStatus','NO_EDGE'),'confidence':ensemble_detail.get('confidence'),
               'components':component_view,'windows':{str(k):v for k,v in windows.items()},
+              'outsideCandidate':outside_candidate(ensemble_detail.get('scores')) if (row or pending) else None,
               'baselineTop1':research.get('baselineTop1'),'bestComplexTop1':research.get('bestComplexTop1'),
               'note':'综合排序含固定的探索性权重；Top3百分比是相对模型分数，并非实际命中概率。经同批样本验证优于基础分布的模型才获得额外权重；仅统计开奖前锁定记录。'}
     result={'single':ai_single,'scores':scores,'historicalSample':len(historical),

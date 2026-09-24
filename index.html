@@ -28,11 +28,13 @@
       </section>
 
       <section class="card ai-home-card v91-ai-card">
-        <div class="section-title">V9.3 多维AI决策中心</div>
+        <div class="section-title">V9.3.4 多维AI决策中心</div>
         <div class="ai-hero">
           <div><small>最终综合结论</small><strong id="aiFinalDecision">分析中</strong><span id="aiEdgeStatus">等待17组数据</span></div>
           <div class="ai-top3-big" id="aiTop3">Top3：等待数据</div>
         </div>
+        <div class="ai-outside" id="aiOutside">非3/4研究候选：等待本期预测锁定</div>
+        <div class="ai-spectrum" id="aiSpectrum" aria-label="单0至单7的相对模型分数"></div>
         <div class="ai-model-grid" id="aiModelGrid"><div class="ai-model-item">多维模型正在建立本期快照…</div></div>
         <div class="ai-feedback">
           <div class="ai-feedback-title">真实样本外命中反馈</div>
@@ -230,6 +232,18 @@
     var edgeCN=edge==='EVIDENCE'?'探索性统计信号较强':(edge==='WEAK_EDGE'?'探索性弱信号':'探索性排序 · 暂无验证优势');
     text('aiFinalDecision',(ai.frozen&&aiSingle!==null)?('单'+aiSingle):(c17Exact?'等待正式锁定':'分析中'));
     text('aiEdgeStatus',edgeCN);
+    var outside=ai.frozen?dec.outsideCandidate:null;
+    text('aiOutside',outside && outside.single!=null
+      ?'非3/4研究候选：单'+outside.single+' · 相对分数 '+Number(outside.score).toFixed(2)+'%（独立展示，不另计命中）'
+      :'非3/4研究候选：等待本期预测锁定');
+    var spectrum=document.getElementById('aiSpectrum'), spectrumHTML='';
+    if(ai.frozen && spectrum){
+      for(var si=0;si<8;si++){
+        var sv=Number(scoreMap[String(si)]);
+        spectrumHTML+='<div class="ai-spectrum-item"><b>单'+si+'</b><span>'+(Number.isFinite(sv)?sv.toFixed(1):'--')+'%</span></div>';
+      }
+    }
+    if(spectrum)spectrum.innerHTML=spectrumHTML;
     var comps=Array.isArray(dec.components)?dec.components:[], mh='';
     for(var mi=0;mi<comps.length;mi++){var mc=comps[mi], ms=(mc.single===0||mc.single)?('单'+mc.single):'--', rr=mc.top1Rate!=null?Number(mc.top1Rate).toFixed(1)+'% / '+Number(mc.sample||0)+'期':'积累中'; mh+='<div class=\"ai-model-item\"><b>'+mc.label+'</b><strong>'+ms+'</strong><small>权重 '+Number(mc.weight||0).toFixed(1)+'% · OOS '+rr+'</small></div>';}
     if(mh)document.getElementById('aiModelGrid').innerHTML=mh;
