@@ -15,6 +15,12 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .section-title{font-size:17px;font-weight:800;margin-bottom:12px;color:#24324b}
 .placeholder{min-height:52px;border-radius:9px;background:#f7f9fc;display:flex;align-items:center;justify-content:center;color:#9aa5b5;font-size:14px}
 .hero-card .placeholder.large{min-height:118px;background:#fff8f2;color:#c47a3b}
+.result-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+.result-head .section-title{margin-bottom:0}
+.period-badge{padding:7px 11px;border-radius:9px;background:#fff1e7;color:#a94b08;font-size:13px;white-space:nowrap}
+.period-badge strong{font-size:16px}
+.result-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
+.result-box{height:54px;border-radius:50%;background:#eef1f5;color:#24324b;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:800;border:1px solid #dce2ea}
 .content>.card:nth-child(2){border-color:#8b4de8}
 .content>.card:nth-child(2) .section-title{color:#5d25a8}
 .omission-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
@@ -24,4 +30,4 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .content>.card:nth-child(3){border-color:#2196f3}
 .content>.card:nth-child(3) .section-title{color:#1b67aa}
 .table-placeholder{min-height:180px;background:#f8fbff}
-@media(max-width:360px){.content{padding:2px 8px 12px}.topbar,.page-tabs{margin-left:8px;margin-right:8px}.card{padding:12px}.omission-grid{gap:6px}.stat{font-size:14px}}
+@media(max-width:360px){.content{padding:2px 8px 12px}.topbar,.page-tabs{margin-left:8px;margin-right:8px}.card{padding:12px}.omission-grid{gap:6px}.stat{font-size:14px}.result-grid{gap:5px}.result-box{height:43px;font-size:15px}.period-badge{font-size:12px;padding:6px 8px}}

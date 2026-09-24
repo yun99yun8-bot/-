@@ -8,11 +8,6 @@
 </head>
 <body>
   <div class="app">
-    <header class="topbar">
-      <div class="brand">Torn计算</div>
-      <div class="top-spacer"></div>
-    </header>
-
     <nav class="page-tabs" aria-label="页面导航">
       <button class="active">Torn计算</button>
       <button>历史数据</button>
@@ -20,8 +15,19 @@
 
     <main class="content">
       <section class="card hero-card">
-        <div class="section-title">开奖结果</div>
-        <div class="placeholder large">等待数据</div>
+        <div class="result-head">
+          <div class="section-title">开奖结果</div>
+          <div class="period-badge">第 <strong>0000</strong> 期</div>
+        </div>
+        <div class="result-grid" aria-label="七个开奖结果">
+          <div class="result-box">--</div>
+          <div class="result-box">--</div>
+          <div class="result-box">--</div>
+          <div class="result-box">--</div>
+          <div class="result-box">--</div>
+          <div class="result-box">--</div>
+          <div class="result-box">--</div>
+        </div>
       </section>
 
       <section class="card">
