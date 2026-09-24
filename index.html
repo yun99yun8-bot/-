@@ -52,14 +52,14 @@
       <section class="card">
         <div class="section-title">遗漏统计</div>
         <div class="omission-grid">
-          <div class="stat">单0<small>--期</small></div>
-          <div class="stat">单1<small>--期</small></div>
-          <div class="stat">单2<small>--期</small></div>
-          <div class="stat">单3<small>--期</small></div>
-          <div class="stat">单4<small>--期</small></div>
-          <div class="stat">单5<small>--期</small></div>
-          <div class="stat">单6<small>--期</small></div>
-          <div class="stat">单7<small>--期</small></div>
+          <div class="stat" data-single="0">单0<small>--期</small></div>
+          <div class="stat" data-single="1">单1<small>--期</small></div>
+          <div class="stat" data-single="2">单2<small>--期</small></div>
+          <div class="stat" data-single="3">单3<small>--期</small></div>
+          <div class="stat" data-single="4">单4<small>--期</small></div>
+          <div class="stat" data-single="5">单5<small>--期</small></div>
+          <div class="stat" data-single="6">单6<small>--期</small></div>
+          <div class="stat" data-single="7">单7<small>--期</small></div>
         </div>
       </section>
 
@@ -120,6 +120,15 @@
     document.getElementById('statsConclusion').textContent=text;
   }
 
+  function renderOmission(data){
+    const omission = data.omission || {};
+    document.querySelectorAll('.stat[data-single]').forEach(el=>{
+      const k=el.dataset.single;
+      const small=el.querySelector('small');
+      if(small) small.textContent=`${omission[k] ?? '--'}期`;
+    });
+  }
+
   function renderGroups(groups){
     const body=document.getElementById('groupTableBody');
     if(!groups || !groups.length){ body.innerHTML='<tr><td colspan="4">等待区块数据</td></tr>'; return; }
@@ -136,6 +145,7 @@
       document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=(data.numbers&&data.numbers[i])||'--';});
       document.getElementById('blockValue').textContent=data.blockNumber??'--';
       renderStats(data);
+      renderOmission(data);
       renderGroups(data.groups||[]);
     }catch(err){
       console.error(err);

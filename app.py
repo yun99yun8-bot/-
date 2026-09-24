@@ -184,6 +184,21 @@ def write_state(data):
     tmp.replace(STATE_FILE)
 
 
+def update_omission(state, official):
+    omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
+    omission = {str(i): int(omission.get(str(i), 0) or 0) for i in range(8)}
+    key = f"{state.get('date','')}:{state.get('period','')}"
+    if state.get('lastOmissionPeriod') == key:
+        return omission
+    single = official.get('singleCount')
+    if single is None or not 0 <= int(single) <= 7:
+        return omission
+    for i in range(8):
+        omission[str(i)] = 0 if i == int(single) else omission[str(i)] + 1
+    state['lastOmissionPeriod'] = key
+    return omission
+
+
 def target_block_number(date_str, period, state, latest_number):
     """Map platform periods to the corresponding TRON result block.
 
@@ -256,7 +271,10 @@ def draw():
 
         # Preserve the last confirmed official result until the next one exists.
         if official:
+            # Update omission exactly once when a new official period is confirmed.
+            prior = dict(state)
             state = {
+                **prior,
                 'date': date_str,
                 'period': period_str,
                 'platformPeriod': platform_period,
@@ -267,6 +285,7 @@ def draw():
                 'groups': groups,
                 'source': 'TRONGrid / getblockbynum'
             }
+            state['omission'] = update_omission(state, official)
             write_state(state)
         else:
             # Keep same-period group cache even when group 20 is not ready.
