@@ -1,3 +1,21 @@
+# V8.1.2 — Prediction Lifecycle Repair
+
+This build keeps the V8.1.1 split Web/Background-Worker architecture and PostgreSQL cross-process health.
+
+## Main repair
+- Autonomous prediction lock now requires strict groups 1–17 and never group20.
+- Removed nonessential legacy relation/analysis queries from the critical G17→G20 lock path.
+- Prediction snapshot enters the durable retry queue before PostgreSQL persistence.
+- Lock is idempotent; an existing legitimate pre-result row is never overwritten.
+- Period engine polling tightened to 200 ms.
+- Missed periods are never backfilled after group20.
+- Web remains read/API-only when deployed with the worker architecture.
+
+## Render
+Background Worker start command: `python worker.py`
+Build command: `pip install -r requirements.txt`
+Both Web and Worker must use the same `DATABASE_URL`.
+
 Fix7：在保持 Fix6 开奖结果和区块映射不变的基础上，修复“20组区块数据”表。
 
 - 当前期固定展示第1组到第20组，共20行。

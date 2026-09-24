@@ -61,7 +61,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v8.1.1-production-2'
+MODEL_VERSION = 'v8.1.2-prediction-lifecycle-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -868,7 +868,7 @@ def autonomous_period_worker():
                 set_period_runtime(ds,p,target,'COLLECTING',seen)
         except Exception as exc:
             worker_touch('period-engine',exc)
-        time.sleep(0.40)
+        time.sleep(0.20)
 
 
 def _start_managed_worker(name, target):
@@ -1563,50 +1563,66 @@ def v7_ensemble(groups, historical, relation=None):
             'confidence':round(confidence*100,1),'weights':weights,'components':parts}
 
 def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None, force_backend=False):
+    """Lock a pre-result prediction.
+
+    V8.1.2 fast path: when the autonomous worker owns the lock we deliberately
+    avoid the older relation/legacy-analysis queries before persisting.  Those
+    queries were wasted because V7 ensemble replaced their answer afterwards,
+    and on a ~9 second G17->G20 window they could make a healthy worker miss the
+    lock entirely.  The durable snapshot is now created from exactly groups
+    1..17 plus history and is placed in the retry queue before the DB write.
+    """
     countdown=int(ui_countdown) if ui_countdown is not None else None
     if not force_backend and countdown != 10:
         return None
     if groups.get('20'):
         return None
+    # Formal autonomous locks require the complete strict 17-group input.
+    if force_backend and not all(str(i) in groups for i in range(1,18)):
+        return None
     stats=stats_from_groups(groups)
     if int(stats.get('sampleSize') or 0) < 1:
         return None
+    key=f'{date_str}:{int(period):04d}'
+    # Idempotency: never recompute an already durable pre-result lock.
+    existing=prediction_exists(key)
+    if existing is not None:
+        return {'single':None,'scores':{},'historicalSample':0,'frozen':True,
+                'period':int(period),'lockCountdown':countdown,'lockSource':'existing'}
+
     historical=get_historical_official_singles(date_str,period)
-    relation=group20_relation_model(date_str,period)
-    ai,scores=ai_analysis_from_data(groups,historical,relation)
-    if ai is None:return None
-    top3=sorted(range(8),key=lambda i:(-float(scores.get(str(i),0)),i))[:3]
+    c17=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
+
+    # The production prediction is the local V7 ensemble.  It uses only data
+    # available before group20.  Do this before any nonessential analytics.
+    v7=v7_ensemble(groups,historical)
+    ai=int(v7['single'])
+    top3=[int(x) for x in v7['top3']]
     highest=stats.get('highest') or []
     dc=int(highest[0]['single']) if len(highest)==1 else None
-    c17=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
-    key=f'{date_str}:{int(period):04d}'
-    # V7 ensemble uses only information available before group20.
-    try:
-        _v7hist=get_historical_official_singles(date_str, period)
-        _v7=v7_ensemble(groups,_v7hist)
-        ai=int(_v7['single'])
-        top3=[int(x) for x in _v7['top3']]
-    except Exception:
-        _v7=None
     payload={'key':key,'date':date_str,'period':int(period),'target20':int(target20),
-             'dataConclusion':dc,'ai':int(ai),'top3':top3,
-             'confidence': (_v7.get('confidence') if _v7 else None), 'ensemble': _v7,'sampleSize':int(stats.get('sampleSize') or 0),
-             'c17':c17.get('single') if c17 else None,'c17Mode':c17.get('mode') if c17 else None}
-    # Capture BEFORE touching PostgreSQL. From this point the period can safely
-    # survive DB pool exhaustion, a Render hiccup, or group20 arriving.
+             'dataConclusion':dc,'ai':ai,'top3':top3,
+             'confidence':v7.get('confidence'),'ensemble':v7,
+             'sampleSize':int(stats.get('sampleSize') or 0),
+             'c17':c17.get('single') if c17 else None,
+             'c17Mode':c17.get('mode') if c17 else None}
+
+    # Durability boundary: snapshot first, DB second.  If PostgreSQL is briefly
+    # unavailable the pending queue keeps retrying while group20 is still absent.
     with _pending_ai_lock:
         _pending_ai_predictions.setdefault(key,payload)
     try:
         _persist_ai_payload(payload)
         with _pending_ai_lock:
             _pending_ai_predictions.pop(key,None)
+        record_system_event('ai_locked_pre_result',key,{'source':'backend' if force_backend else 'ui','top3':top3})
     except Exception as exc:
         with _runtime_health_lock:
             _runtime_health['lastAiError']=str(exc)[:300]
         record_system_event('ai_persist_retry',key,{'error':str(exc)[:300]})
     with _ai_summary_cache_lock:
         _ai_summary_cache.update({'key':None,'at':0,'value':None})
-    return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True,
+    return {'single':ai,'scores':v7.get('scores') or {},'historicalSample':len(historical),'frozen':True,
             'period':int(period),'lockCountdown':countdown,
             'lockSource':'backend' if force_backend else 'ui'}
 
