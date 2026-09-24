@@ -404,25 +404,12 @@ def build_recent_official_history(date_str, period, count=20):
 
 
 def stats_from_groups(groups):
-    """Use only groups 1-18 of ONE 20-group round.
+    """Calculate statistics from groups 1-18 of the current 20-group round.
 
-    Once group 20 is confirmed, the round is complete and the statistics
-    reset to zero. This prevents group 1-18 from the previous round from
-    being mixed with group 1-18 of the next round.
+    Groups 19 and 20 are still recorded, but they are not part of the
+    statistics sample. Group 20 being available must NOT clear groups 1-18.
     """
     groups = groups if isinstance(groups, dict) else {}
-    complete = groups.get('20')
-    if isinstance(complete, dict) and complete.get('numbers'):
-        counts = {str(i): 0 for i in range(8)}
-        return {
-            'sampleSize': 0,
-            'stats': [
-                {'single': i, 'count': 0, 'probability': 0}
-                for i in range(8)
-            ],
-            'highest': []
-        }
-
     counts = {str(i): 0 for i in range(8)}
     used = 0
     for group_no in range(1, 19):
