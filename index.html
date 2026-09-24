@@ -137,7 +137,7 @@
     if(lockedAiPeriod!==periodKey){ lockedAiPeriod=periodKey; lockedAiDisplay=null; }
     // Only expose one stable prediction window per period: countdown 10..1.
     // At 10 seconds snapshot the current backend analysis; do not let it jump afterwards.
-    if(currentCountdownValue===10 && !lockedAiDisplay){
+    if(currentCountdownValue>=1 && currentCountdownValue<=10 && !lockedAiDisplay){
       lockedAiDisplay=JSON.parse(JSON.stringify(ai||{}));
     }
     var shown=(currentCountdownValue>=1 && currentCountdownValue<=10 && lockedAiDisplay)?lockedAiDisplay:null;
@@ -173,7 +173,7 @@
     var body=document.getElementById('groupTableBody'), map={}; groups=Array.isArray(groups)?groups:[];
     periodKey=String(periodKey||'');
     if(activeGroupPeriodKey!==periodKey){ groupSeenKeys={}; groupHighlightUntil={}; groupsInitialized=false; activeGroupPeriodKey=periodKey; }
-    var now=new Date().getTime();
+    var now=Date.now();
     for(var i=0;i<groups.length;i++){
       var gi=groups[i], gn=Number(gi.group), key=periodKey+'|'+gn+'|'+String(gi.blockNumber==null?'':gi.blockNumber);
       map[gn]=gi;
@@ -181,11 +181,12 @@
       groupSeenKeys[key]=true;
     }
     groupsInitialized=true;
-    var html='', available=[];
-    for(var n=1;n<=20;n++) if(map[n]) available.push(n);
-    if(!available.length){ body.innerHTML='<tr><td colspan="4">等待本期新区块…</td></tr>'; return; }
-    for(var ai=0;ai<available.length;ai++){
-      var n=available[ai], g=map[n], block=g.blockNumber!=null?g.blockNumber:'--', single=g.singleCount!=null?'单'+g.singleCount:'--';
+    // Keep a fixed 20-row frame. Each exact group lights up only when it first arrives.
+    var html='';
+    for(var n=1;n<=20;n++){
+      var g=map[n];
+      if(!g){ html+='<tr class="waiting-group-row"><td>第'+n+'组</td><td>等待新区块</td><td>--</td><td>--</td></tr>'; continue; }
+      var block=g.blockNumber!=null?g.blockNumber:'--', single=g.singleCount!=null?'单'+g.singleCount:'--';
       var nums=Array.isArray(g.numbers)&&g.numbers.length?g.numbers.join(' '):'--';
       var rowKey=periodKey+'|'+n+'|'+String(g.blockNumber==null?'':g.blockNumber);
       var rowClass=(groupHighlightUntil[rowKey] && groupHighlightUntil[rowKey]>now)?' class="new-group-row"':'';
@@ -223,11 +224,13 @@
   }
   function renderFixedResult(data){
     var c=candidateResult(data);
+    // On first page load we may show the last persisted official result.
     if(!fixedResult && c){ fixedResult=c; lastAcceptedResultPeriod=c.period; paintFixedResult(fixedResult); return; }
-    // A period's official result is immutable. Never repaint the seven numbers
-    // during ordinary 1-second polling. Accept only a genuinely newer official
-    // period after the backend has confirmed group 20.
-    if(c && data.officialReady && c.period!==lastAcceptedResultPeriod){
+    // Never allow an old/out-of-order HTTP response to repaint the result.
+    // A new result is accepted only when backend confirms that its block is the
+    // exact current period group-20 target and its block number moves forward.
+    var exactOfficial=!!(c && data.officialReady && Number(c.block)===Number(data.targetResultBlock));
+    if(exactOfficial && (!fixedResult || Number(c.block)>Number(fixedResult.block))){
       fixedResult=c; lastAcceptedResultPeriod=c.period; paintFixedResult(fixedResult);
     }
   }
@@ -235,9 +238,12 @@
     renderStats(data); renderGroups(data.groups||[],data.groupPeriodKey||data.currentPeriod||data.period||''); renderOmission(data); renderHistory(data);
     renderFixedResult(data);
   }
+  var drawRequestBusy=false;
   function loadDraw(){
+    if(drawRequestBusy)return;
+    drawRequestBusy=true;
     var xhr=new XMLHttpRequest(); xhr.open('GET','/api/draw?t='+new Date().getTime(),true); xhr.setRequestHeader('Cache-Control','no-cache');
-    xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}};
+    xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; drawRequestBusy=false; if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}}; xhr.onerror=function(){drawRequestBusy=false;}; xhr.ontimeout=function(){drawRequestBusy=false;};
     xhr.send(null);
   }
   var lastZeroMinute='';

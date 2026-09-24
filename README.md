@@ -58,3 +58,13 @@ AI statistical analysis module:
 - 每次部署/重启后，从 PostgreSQL 保留的历史第20组正式结果重建 单0～单7 遗漏值，不再从0开始。
 - 恢复完成后，继续由当前正式结果实时递增/归零；同一期只更新一次，避免轮询重复累计。
 - `/api/draw` 增加 `omissionSource` 与 `omissionHistorySample` 便于确认恢复来源和样本数。
+
+
+## FIX: fixed 20-slot live board + immutable official result + AI/stat recovery
+- 20 group rows are always visible as fixed slots; each arriving group fills its own row immediately.
+- A newly filled row uses a high-brightness traffic-light highlight for 5 seconds, then returns to normal.
+- Frontend prevents overlapping /api/draw requests, so late HTTP responses cannot repaint older state.
+- Official result only advances when officialReady is true and resultBlockNumber exactly equals targetResultBlock; block number must move forward.
+- Current groupPeriodKey is always emitted, restoring current-period stats/AI rendering.
+- AI display locks once during countdown 10..1 and hides at 00.
+- Removed databaseLatestBlock query from the hot 200ms /api/draw path to reduce DB-induced stalls.

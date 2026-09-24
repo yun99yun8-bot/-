@@ -1097,7 +1097,7 @@ def draw():
                 'platformPeriod': platform_period, 'block': official['block'],
                 'blockNumber': official['blockNumber'], 'numbers': official['numbers'],
                 'singleCount': official['singleCount'], 'groups': groups,
-                'groupPeriodKey': f'{date_str}:{period_str}', 'source': 'PostgreSQL / backend collector'
+                'groupPeriodKey': f'{date_str}:{period_str}', 'source': 'live memory + PostgreSQL persistence'
             }
             state['omission'] = update_omission(state, official)
             write_state(state)
@@ -1109,7 +1109,7 @@ def draw():
         history = build_recent_official_history(date_str, period, 20)
         ai_info = prediction_summary(date_str, period, groups, target20, official)
         payload = {
-            **state, 'platformPeriod': platform_period, 'currentPeriod': period_str,
+            **state, 'platformPeriod': platform_period, 'currentPeriod': period_str, 'groupPeriodKey': f'{date_str}:{period_str}',
             'targetResultBlock': target20, 'officialReady': bool(official),
             'resultNumbers': result_obj.get('numbers', []) if result_obj else [],
             'resultSingleCount': result_obj.get('singleCount') if result_obj else None,
@@ -1121,7 +1121,7 @@ def draw():
             'dataStats': stats_from_groups(groups), 'ok': True, 'isNew': bool(official),
             'databaseStatus': 'connected', 'stale': False,
             'storage': {'database': True, 'retentionDays': DB_RETENTION_DAYS, 'frontendSource': 'PostgreSQL + memory fallback'},
-            'debug': {'databaseLatestBlock': get_db_latest_number(), 'targetBlock': target20, 'fastTarget': dict(_fast_diag)}
+            'debug': {'targetBlock': target20, 'fastTarget': dict(_fast_diag)}
         }
         with _draw_cache_lock:
             _draw_cache = dict(payload)
