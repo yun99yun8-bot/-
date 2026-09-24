@@ -68,3 +68,15 @@ AI statistical analysis module:
 - Current groupPeriodKey is always emitted, restoring current-period stats/AI rendering.
 - AI display locks once during countdown 10..1 and hides at 00.
 - Removed databaseLatestBlock query from the hot 200ms /api/draw path to reduce DB-induced stalls.
+
+## 2026-09-24 全功能复检修复
+- 后端期号时钟与前端统一使用北京时间 -4 秒校准，避免00秒附近前后端跨期不一致。
+- 00:00 正确归属上一日第1440期。
+- 20组固定1-20框架：缺组只显示等待数据，不隐藏整表。
+- 开奖结果继续只接受当前期准确第20组目标区块，防止乱序轮询导致跳动。
+- AI摘要增加后端短缓存，历史样本与最近20期改为批量数据库读取，显著减少200ms轮询造成的数据库压力。
+- AI已锁定时，本期AI前三直接读取数据库保存的 prediction_top3，不再用实时scores重新排序，避免“锁定后前三仍变化”。
+- 历史官方结果计算不再假设所有期固定+20，统一走 period_target_block，兼容已记录的+18校准点。
+- 数据结论/AI分析前端继续使用last-good保护，短暂空响应不会清空已显示内容。
+- 历史数据页移除占位符，新增期级开奖记录和AI预测验证记录。
+- 遗漏统计仍由PostgreSQL历史恢复，运行后按正式第20组去重更新。

@@ -94,17 +94,17 @@
     <main class="content" id="historyContent" hidden>
       <section class="card history-section">
         <div class="section-title">一、模仿预测</div>
-        <div class="placeholder">内容占位</div>
+        <div class="placeholder" id="historyModel">正在读取历史模型数据…</div>
       </section>
 
       <section class="card history-section">
         <div class="section-title">二、历史开奖记录</div>
-        <div class="placeholder table-placeholder">内容占位</div>
+        <div class="placeholder table-placeholder" id="historyDraws">正在读取历史开奖记录…</div>
       </section>
 
       <section class="card history-section">
         <div class="section-title">三、历史预判记录</div>
-        <div class="placeholder table-placeholder">内容占位</div>
+        <div class="placeholder table-placeholder" id="historyPredictions">正在读取历史预判记录…</div>
       </section>
     </main>
   </div>
@@ -122,6 +122,25 @@
   historyTab.onclick=function(){selectTab(false);};
 
   function text(id,value){var el=document.getElementById(id);if(el)el.textContent=(value===null||value===undefined||value==='')?'--':String(value);}
+  var historyBusy=false;
+  function loadHistoryPage(){
+    if(historyBusy)return; historyBusy=true;
+    var x=new XMLHttpRequest(); x.open('GET','/api/history-summary?t='+Date.now(),true);
+    x.onreadystatechange=function(){if(x.readyState!==4)return;historyBusy=false;if(x.status<200||x.status>=300)return;try{var d=JSON.parse(x.responseText);if(!d.ok)return;renderHistoryPage(d.rows||[]);}catch(e){}};
+    x.onerror=function(){historyBusy=false;}; x.send(null);
+  }
+  function renderHistoryPage(rows){
+    var verified=rows.filter(function(r){return r.verified;}); var hits=verified.filter(function(r){return r.hit;}).length;
+    text('historyModel','历史AI前三验证：'+hits+'/'+verified.length+(verified.length?'（'+(hits/verified.length*100).toFixed(2)+'%）':'')+'；仅统计开奖前已保存的预测。');
+    var dh='<table class="group-table"><thead><tr><th>期号</th><th>正式单数</th><th>7个号码</th><th>区块</th></tr></thead><tbody>';
+    var ph='<table class="group-table"><thead><tr><th>期号</th><th>AI前三</th><th>实际</th><th>验证</th></tr></thead><tbody>';
+    for(var i=0;i<rows.length;i++){var r=rows[i],p=String(r.period).padStart(4,'0');
+      if(r.verified)dh+='<tr><td>'+p+'</td><td>单'+r.actualSingle+'</td><td>'+((r.numbers||[]).join(' ')||'--')+'</td><td>'+r.targetBlock+'</td></tr>';
+      ph+='<tr><td>'+p+'</td><td>'+((r.top3||[]).map(function(v){return '单'+v;}).join(' / ')||'--')+'</td><td>'+(r.actualSingle!=null?'单'+r.actualSingle:'待开奖')+'</td><td>'+(r.verified?(r.hit?'✓ 对':'✕ 错'):'待验证')+'</td></tr>';
+    }
+    dh+='</tbody></table>'; ph+='</tbody></table>';
+    document.getElementById('historyDraws').innerHTML=dh; document.getElementById('historyPredictions').innerHTML=ph;
+  }
   var currentCountdownValue=60;
   // UI last-good cache: transient empty API fields must never blank valid analysis.
   var lastGoodAI=null;
@@ -150,8 +169,13 @@
     text('aiAnalysisLine', aiSingle!==null ? ('AI分析：单'+aiSingle+'　｜　历史样本：'+aiSample+'期'+(ai.frozen?'　｜　本期已锁定':'　｜　实时分析')) : 'AI分析：正在分析中…');
     for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
     ranked.sort(function(a,b){return b.score-a.score || a.single-b.single;});
+    var lockedTop=Array.isArray(ai.top3)?ai.top3:[];
     var topParts=[];
-    for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
+    if(ai.frozen && lockedTop.length){
+      for(var ti=0;ti<Math.min(3,lockedTop.length);ti++) topParts.push((ti+1)+'. 单'+lockedTop[ti]);
+    }else{
+      for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
+    }
     text('aiTop3',topParts.length?'本期AI预测前三：'+topParts.join('　'):'本期AI预测前三：正在分析中…');
     var rel=Array.isArray(ai.relationTop3)?ai.relationTop3:[], relParts=[];
     for(var ri=0;ri<rel.length;ri++) relParts.push('第'+rel[ri].group+'组 '+Number(rel[ri].matchRate||0).toFixed(2)+'%');

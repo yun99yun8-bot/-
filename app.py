@@ -53,21 +53,28 @@ _period_group_cache = {}
 _period_group_cache_lock = threading.Lock()
 _omission_bootstrap_lock = threading.Lock()
 _omission_bootstrapped = False
+_history_cache = {'key': None, 'at': 0, 'value': None}
+_history_cache_lock = threading.Lock()
+_ai_summary_cache = {'key': None, 'at': 0, 'value': None}
+_ai_summary_cache_lock = threading.Lock()
+_historical_singles_cache = {'key': None, 'at': 0, 'value': None}
+_historical_singles_cache_lock = threading.Lock()
 
 
 def current_period():
-    now = datetime.now(CN_TZ)
-    # Platform minute numbering: 08:01 is period 0481.
-    # At 00:00, the previous day's 1440th period is still displayed;
-    # 00:01 starts the new day at 0001.
-    period = 1440 if (now.hour == 0 and now.minute == 0) else (now.hour * 60 + now.minute)
-    date_for_period = now.date()
+    # Keep backend period selection on the same calibrated clock as the UI.
+    # The platform display was measured about 4 seconds behind Beijing time.
+    now = datetime.now(CN_TZ) - timedelta(seconds=4)
     if now.hour == 0 and now.minute == 0:
-        # Keep the calendar date shown by the platform for the closing minute.
+        # 00:00 is the closing minute of the previous day's period 1440.
+        date_for_period = now.date() - timedelta(days=1)
+        period = 1440
+    else:
         date_for_period = now.date()
+        period = now.hour * 60 + now.minute
     date_str = date_for_period.strftime('%Y-%m-%d')
     period_str = f'{period:04d}'
-    platform_period = now.strftime('%y%m%d') + period_str
+    platform_period = date_for_period.strftime('%y%m%d') + period_str
     return date_str, period, period_str, platform_period
 
 
@@ -704,19 +711,27 @@ def collect_groups_live(date_str, period):
 
 
 def build_recent_official_history(date_str, period, count=20):
-    history = []
-    idx_now = period_index(date_str, period)
-    for offset in range(count - 1, -1, -1):
-        idx = idx_now - offset
-        ordinal, zero = divmod(idx, 1440)
-        d = date.fromordinal(ordinal)
-        p = zero + 1
-        target = period_target_block(d.strftime('%Y-%m-%d'), p)
-        rows = get_db_blocks([target])
-        row = rows.get(target)
+    """Build recent official results with one batched DB read, cached briefly."""
+    cache_key = f"{date_str}:{int(period):04d}:{int(count)}"
+    now = time.time()
+    with _history_cache_lock:
+        if _history_cache.get('key') == cache_key and _history_cache.get('value') is not None and now - _history_cache.get('at', 0) < 2.0:
+            return list(_history_cache['value'])
+    items=[]; wanted=[]
+    idx_now=period_index(date_str, period)
+    for offset in range(count-1,-1,-1):
+        idx=idx_now-offset; ordinal,zero=divmod(idx,1440); d=date.fromordinal(ordinal); p=zero+1
+        target=period_target_block(d.strftime('%Y-%m-%d'),p)
+        items.append((d,p,target)); wanted.append(target)
+    try: rows=get_db_blocks(wanted)
+    except Exception: rows={}
+    history=[]
+    for d,p,target in items:
+        row=rows.get(target)
         if row:
-            pp = d.strftime('%y%m%d') + f'{p:04d}'
-            history.append({'platformPeriod': pp, 'period': f'{p:04d}', 'blockNumber': target, 'singleCount': int(row['single_count'])})
+            history.append({'platformPeriod':d.strftime('%y%m%d')+f'{p:04d}','period':f'{p:04d}','blockNumber':target,'singleCount':int(row['single_count'])})
+    with _history_cache_lock:
+        _history_cache.update({'key':cache_key,'at':now,'value':list(history)})
     return history
 
 
@@ -745,22 +760,25 @@ def stats_from_groups(groups):
 
 
 def get_historical_official_singles(date_str, period, limit=720):
-    """Return prior official group-20 single counts from retained DB history."""
-    target_now = period_target_block(date_str, period)
-    conn = db_connect()
-    if conn is None:
-        return []
-    try:
-        with conn.cursor() as cur:
-            # Official result blocks follow the platform's 20-block cadence.
-            cur.execute("""
-                SELECT single_count FROM tron_blocks
-                WHERE block_number < %s AND MOD((%s - block_number), 20) = 0
-                ORDER BY block_number DESC LIMIT %s
-            """, (target_now, target_now, int(limit)))
-            return [int(r[0]) for r in cur.fetchall()]
-    finally:
-        db_release(conn)
+    """Return prior official group-20 singles using calibrated period targets.
+
+    This avoids assuming every historical boundary is exactly +20 blocks; known
+    +18 calibration transitions are respected by period_target_block().
+    """
+    cache_key=f'{date_str}:{int(period):04d}:{int(limit)}'; now=time.time()
+    with _historical_singles_cache_lock:
+        if _historical_singles_cache.get('key')==cache_key and _historical_singles_cache.get('value') is not None and now-_historical_singles_cache.get('at',0)<10:
+            return list(_historical_singles_cache['value'])
+    idx_now=period_index(date_str,period); wanted=[]
+    for off in range(1,int(limit)+1):
+        idx=idx_now-off; ordinal,zero=divmod(idx,1440); d=date.fromordinal(ordinal); p=zero+1
+        wanted.append(period_target_block(d.strftime('%Y-%m-%d'),p))
+    try: rows=get_db_blocks(wanted)
+    except Exception: rows={}
+    values=[int(rows[t]['single_count']) for t in wanted if t in rows and rows[t].get('single_count') is not None]
+    with _historical_singles_cache_lock:
+        _historical_singles_cache.update({'key':cache_key,'at':now,'value':list(values)})
+    return values
 
 
 def group20_relation_model(date_str, period, lookback=120):
@@ -966,6 +984,12 @@ def verify_prediction(date_str, period, official):
 
 def prediction_summary(date_str, period, groups, target20, official):
     key=f'{date_str}:{int(period):04d}'
+    now=time.time()
+    with _ai_summary_cache_lock:
+        cached=_ai_summary_cache.get('value') if _ai_summary_cache.get('key')==key else None
+        cached_at=_ai_summary_cache.get('at',0)
+    if cached is not None and not official and now-cached_at < 1.0:
+        return dict(cached)
     if official: verify_prediction(date_str,period,official)
     else: save_prediction_if_ready(date_str,period,groups,target20)
     conn=db_connect(); row=None; agg=None; latest_verified=None
@@ -988,6 +1012,15 @@ def prediction_summary(date_str, period, groups, target20, official):
     relation=group20_relation_model(date_str, period)
     live_ai,scores=ai_analysis_from_data(groups,historical,relation)
     ai_single=int(row['ai_analysis']) if row else live_ai
+    frozen_top3=[]
+    if row and row.get('prediction_top3') is not None:
+        frozen_top3=row.get('prediction_top3') or []
+        if isinstance(frozen_top3,str):
+            try: frozen_top3=json.loads(frozen_top3)
+            except Exception: frozen_top3=[]
+        frozen_top3=[int(x) for x in frozen_top3][:3]
+    live_top3=sorted(range(8), key=lambda i:(-float(scores.get(str(i),0)),i))[:3] if scores else []
+    display_top3=frozen_top3 if frozen_top3 else live_top3
     verified=int(agg['verified'] or 0) if agg else 0; hits=int(agg['ai_hits'] or 0) if agg else 0
     dv=int(agg['data_verified'] or 0) if agg else 0; dh=int(agg['data_hits'] or 0) if agg else 0
     matches=[]
@@ -1005,12 +1038,15 @@ def prediction_summary(date_str, period, groups, target20, official):
         actual=int(latest_verified['actual_single'])
         hit_position=(pred.index(actual)+1) if actual in pred else None
         latest_result={'period':int(latest_verified['period_no']), 'top3':pred, 'actual':actual, 'hit':bool(hit_position), 'hitPosition':hit_position}
-    return {'single':ai_single,'scores':scores,'historicalSample':len(historical),
-            'frozen':bool(row),'verifiedSample':verified,'hits':hits,
+    result={'single':ai_single,'scores':scores,'historicalSample':len(historical),
+            'frozen':bool(row),'top3':display_top3,'verifiedSample':verified,'hits':hits,
             'top3Hits':top3_hits,'top3HitRate':round(top3_hits/verified*100,2) if verified else None,'latestVerified':latest_result,
             'hitRate':round(hits/verified*100,2) if verified else None,
             'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,
             'sameAsGroup20':matches,'relationTop3':(relation.get('ranking') or [])[:3],'relationSample':relation.get('samplePeriods',0)}
+    with _ai_summary_cache_lock:
+        _ai_summary_cache.update({'key':key,'at':time.time(),'value':dict(result)})
+    return result
 
 def read_state():
     try:
@@ -1238,6 +1274,42 @@ def db_check():
                 conn.close()
             except Exception:
                 pass
+
+
+@app.get('/api/history-summary')
+def history_summary():
+    """Compact period-level history for the History tab."""
+    conn=db_connect()
+    if conn is None:
+        return jsonify({'ok':False,'error':'database unavailable'}),503
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT p.period_date,p.period_no,p.target_block,p.data_conclusion,p.ai_analysis,
+                          p.prediction_top3,p.actual_single,p.created_at,p.verified_at,b.numbers,b.single_count
+                          FROM ai_predictions p LEFT JOIN tron_blocks b ON b.block_number=p.target_block
+                          ORDER BY p.period_date DESC,p.period_no DESC LIMIT 100""")
+            rows=cur.fetchall()
+        out=[]
+        for r in rows:
+            top=r.get('prediction_top3') or []
+            if isinstance(top,str):
+                try: top=json.loads(top)
+                except Exception: top=[]
+            nums=r.get('numbers') or []
+            if isinstance(nums,str):
+                try: nums=json.loads(nums)
+                except Exception: nums=[]
+            actual=r.get('actual_single')
+            hit=bool(actual is not None and int(actual) in [int(x) for x in top])
+            out.append({'date':r['period_date'].isoformat() if r.get('period_date') else None,
+                        'period':int(r['period_no']),'targetBlock':int(r['target_block']),
+                        'dataConclusion':r.get('data_conclusion'),'aiAnalysis':r.get('ai_analysis'),
+                        'top3':[int(x) for x in top][:3],'actualSingle':int(actual) if actual is not None else None,
+                        'numbers':nums,'hit':hit,'verified':actual is not None})
+        return jsonify({'ok':True,'rows':out})
+    finally:
+        db_release(conn)
+
 
 @app.get('/api/history')
 def history():
