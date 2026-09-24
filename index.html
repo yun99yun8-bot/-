@@ -99,102 +99,69 @@
     </main>
   </div>
 <script>
-  const tornTab=document.getElementById('tornTab');
-  const historyTab=document.getElementById('historyTab');
-  const tornContent=document.getElementById('tornContent');
-  const historyContent=document.getElementById('historyContent');
-  function selectTab(active){
-    const isTorn=active===tornTab;
-    tornTab.classList.toggle('active', isTorn);
-    historyTab.classList.toggle('active', !isTorn);
-    tornContent.hidden=!isTorn;
-    historyContent.hidden=isTorn;
+(function(){
+  var tornTab=document.getElementById('tornTab');
+  var historyTab=document.getElementById('historyTab');
+  var tornContent=document.getElementById('tornContent');
+  var historyContent=document.getElementById('historyContent');
+  function selectTab(isTorn){
+    if(isTorn){tornTab.classList.add('active');historyTab.classList.remove('active');tornContent.hidden=false;historyContent.hidden=true;}
+    else{historyTab.classList.add('active');tornTab.classList.remove('active');historyContent.hidden=false;tornContent.hidden=true;}
   }
-  tornTab.addEventListener('click',()=>selectTab(tornTab));
-  historyTab.addEventListener('click',()=>selectTab(historyTab));
+  tornTab.onclick=function(){selectTab(true);};
+  historyTab.onclick=function(){selectTab(false);};
 
+  function text(id,value){var el=document.getElementById(id);if(el)el.textContent=(value===null||value===undefined||value==='')?'--':String(value);}
   function renderStats(data){
-    const rows = (data.dataStats && Array.isArray(data.dataStats.stats)) ? data.dataStats.stats : [];
-    rows.forEach(row=>{
-      const el=document.querySelector(`[data-prob-single="${row.single}"]`);
-      if(!el) return;
-      const sm=el.querySelectorAll('small');
-      if(sm[0]) sm[0].textContent=`次数：${row.count}次`;
-      if(sm[1]) sm[1].textContent=`概率：${Number(row.probability||0).toFixed(2)}%`;
-    });
-    const sample=(data.dataStats && data.dataStats.sampleSize) || 0;
-    const highest=(data.dataStats && Array.isArray(data.dataStats.highest)) ? data.dataStats.highest : [];
-    const text=highest.length ? `结论：${highest.map(x=>`单${x.single}`).join('、')} 最高（${highest[0].count}次 / ${sample}组）` : '结论：等待第1～18组数据';
-    document.getElementById('statsConclusion').textContent=text;
-  }
-
-  function renderResultHistory(data){
-    const box=document.getElementById('resultHistory20');
-    const current=String(data.resultPlatformPeriod || data.platformPeriod || '');
-    const history=Array.isArray(data.resultHistory)
-      ? [...data.resultHistory].filter(x=>String((x && x.platformPeriod)||'') !== current).reverse()
-      : [];
-    const rows=Array.from({length:20},(_,i)=>history[i]||null);
-    box.innerHTML=rows.map((row)=>{
-      if(!row) return '<div class="history20-item waiting"><strong>--</strong><small>等待开奖</small></div>';
-      const rawPeriod=String(row.platformPeriod || row.period || '--');
-      const period=rawPeriod.length >= 4 ? rawPeriod.slice(-4) : rawPeriod;
-      const single=(row.singleCount!==null && row.singleCount!==undefined) ? `单${row.singleCount}` : '--';
-      return `<div class="history20-item"><strong>${period}</strong><small>${single}</small></div>`;
-    }).join('');
-  }
-
-  function renderOmission(data){
-    const omission = data.omission || {};
-    document.querySelectorAll('.stat[data-single]').forEach(el=>{
-      const k=el.dataset.single;
-      const small=el.querySelector('small');
-      if(small) small.textContent=`${(omission[k] !== null && omission[k] !== undefined ? omission[k] : '--')}期`;
-    });
-  }
-
-  function renderGroups(groups){
-    const body=document.getElementById('groupTableBody');
-    // 固定先建立第1～20组框架；接口有数据后，只填充对应组。
-    const map=new Map((Array.isArray(groups)?groups:[]).map(g=>[Number(g.group),g]));
-    body.innerHTML=Array.from({length:20},(_,i)=>{
-      const n=i+1;
-      const g=map.get(n);
-      const block=(g && g.blockNumber !== null && g.blockNumber !== undefined) ? g.blockNumber : '--';
-      const single=(g && g.singleCount !== null && g.singleCount !== undefined) ? `单${g.singleCount}` : '--';
-      const nums=(g && Array.isArray(g.numbers) && g.numbers.length) ? g.numbers.join(' ') : '--';
-      const cls=g ? ' has-data' : ' waiting';
-      return `<tr class="group-row-${n}${cls}"><td>第${n}组</td><td>${block}</td><td>${single}</td><td>${nums}</td></tr>`;
-    }).join('');
-  }
-
-  async function loadDraw(){
-    try{
-      const res=await fetch('/api/draw?t='+Date.now(),{cache:'no-store'});
-      const data=await res.json();
-      if(!data.ok) { console.error('API错误', data); throw new Error(data.error||'开奖数据获取失败'); }
-      console.log('Torn API状态', data.debug || {}, data);
-      // Result fields are deliberately read from the confirmed-result keys.
-      // The API may simultaneously report the current period while retaining
-      // the previous confirmed result until the new group-20 block exists.
-      // Result priority: explicit result object -> group 20 -> legacy fields.
-      const g20 = Array.isArray(data.groups) ? data.groups.find(g=>Number(g.group)===20) : null;
-      const result = (data.result && Array.isArray(data.result.numbers) && data.result.numbers.length===7) ? data.result : (g20 && Array.isArray(g20.numbers) && g20.numbers.length===7 ? g20 : null);
-      const resultNumbers = (result && result.numbers) || (Array.isArray(data.resultNumbers) ? data.resultNumbers : (Array.isArray(data.numbers) ? data.numbers : []));
-      document.getElementById('periodValue').textContent=(result && result.platformPeriod) || data.resultPlatformPeriod || data.platformPeriod || data.period || '0000000000';
-      document.getElementById('singleValue').textContent=(result && result.singleCount != null) ? result.singleCount : (data.resultSingleCount != null ? data.resultSingleCount : (data.singleCount != null ? data.singleCount : '--'));
-      document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=(resultNumbers[i] ?? '--');});
-      document.getElementById('blockValue').textContent=(result && result.blockNumber != null) ? result.blockNumber : (data.resultBlockNumber != null ? data.resultBlockNumber : (data.blockNumber != null ? data.blockNumber : '--'));
-      renderStats(data);
-      renderResultHistory(data);
-      renderOmission(data);
-      renderGroups(data.groups||[]);
-    }catch(err){
-      console.error(err);
+    var ds=data.dataStats||{}; var rows=Array.isArray(ds.stats)?ds.stats:[];
+    for(var i=0;i<rows.length;i++){
+      var row=rows[i], el=document.querySelector('[data-prob-single="'+row.single+'"]');
+      if(!el)continue; var sm=el.querySelectorAll('small');
+      if(sm[0])sm[0].textContent='次数：'+row.count+'次';
+      if(sm[1])sm[1].textContent='概率：'+Number(row.probability||0).toFixed(2)+'%';
     }
+    var sample=Number(ds.sampleSize||0), highest=Array.isArray(ds.highest)?ds.highest:[], names=[];
+    for(var j=0;j<highest.length;j++)names.push('单'+highest[j].single);
+    text('statsConclusion',highest.length?'结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）':'结论：等待第1～18组数据');
   }
-  loadDraw();
-  setInterval(loadDraw, 1000);
+  function renderGroups(groups){
+    var body=document.getElementById('groupTableBody'), map={}; groups=Array.isArray(groups)?groups:[];
+    for(var i=0;i<groups.length;i++)map[Number(groups[i].group)]=groups[i];
+    var html='';
+    for(var n=1;n<=20;n++){
+      var g=map[n], block=g&&g.blockNumber!=null?g.blockNumber:'--', single=g&&g.singleCount!=null?'单'+g.singleCount:'--';
+      var nums=g&&Array.isArray(g.numbers)&&g.numbers.length?g.numbers.join(' '):'--';
+      html+='<tr><td>第'+n+'组</td><td>'+block+'</td><td>'+single+'</td><td>'+nums+'</td></tr>';
+    }
+    body.innerHTML=html;
+  }
+  function renderOmission(data){
+    var o=data.omission||{}, els=document.querySelectorAll('.stat[data-single]');
+    for(var i=0;i<els.length;i++){var k=els[i].getAttribute('data-single'), sm=els[i].querySelector('small');if(sm)sm.textContent=(o[k]!=null?o[k]:'--')+'期';}
+  }
+  function renderHistory(data){
+    var box=document.getElementById('resultHistory20'), h=Array.isArray(data.resultHistory)?data.resultHistory.slice():[]; h.reverse(); var html='';
+    for(var i=0;i<20;i++){var r=h[i];if(!r){html+='<div class="history20-item waiting"><strong>--</strong><small>等待开奖</small></div>';continue;}
+      var p=String(r.platformPeriod||r.period||'--'); if(p.length>=4)p=p.slice(-4);
+      html+='<div class="history20-item"><strong>'+p+'</strong><small>'+(r.singleCount!=null?'单'+r.singleCount:'--')+'</small></div>';}
+    box.innerHTML=html;
+  }
+  function render(data){
+    renderStats(data); renderGroups(data.groups||[]); renderOmission(data); renderHistory(data);
+    var result=(data.result&&Array.isArray(data.result.numbers))?data.result:null;
+    var nums=result?result.numbers:(Array.isArray(data.resultNumbers)?data.resultNumbers:(Array.isArray(data.numbers)?data.numbers:[]));
+    text('periodValue',(result&&result.platformPeriod)||data.resultPlatformPeriod||data.platformPeriod||data.currentPeriod||data.period||'0000000000');
+    text('singleValue',result&&result.singleCount!=null?result.singleCount:(data.resultSingleCount!=null?data.resultSingleCount:data.singleCount));
+    text('blockValue',result&&result.blockNumber!=null?result.blockNumber:(data.resultBlockNumber!=null?data.resultBlockNumber:data.blockNumber));
+    var boxes=document.querySelectorAll('[data-result]'); for(var i=0;i<boxes.length;i++)boxes[i].textContent=nums[i]!=null?nums[i]:'--';
+  }
+  function loadDraw(){
+    var xhr=new XMLHttpRequest(); xhr.open('GET','/api/draw?t='+new Date().getTime(),true); xhr.setRequestHeader('Cache-Control','no-cache');
+    xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}};
+    xhr.send(null);
+  }
+  loadDraw(); window.setInterval(loadDraw,2000);
+})();
 </script>
 </body>
 </html>
