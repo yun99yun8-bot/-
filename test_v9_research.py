@@ -4,6 +4,7 @@ import json
 import math
 import unittest
 from pathlib import Path
+import hash_research
 
 
 # Load only the pure research functions so tests do not require a live Flask,
@@ -14,7 +15,7 @@ names = {'_norm_scores', '_candidate_rank', 'research_model_performance',
          'should_poll_target', 'outside_candidate'}
 module = ast.Module(body=[n for n in source.body if isinstance(n, ast.FunctionDef)
                           and n.name in names], type_ignores=[])
-scope = {'json': json, 'RealDictCursor': object()}
+scope = {'json': json, 'RealDictCursor': object(), 'hash_research': hash_research}
 exec(compile(module, '<research>', 'exec'), scope)
 
 
@@ -32,6 +33,22 @@ class Connection:
 
 
 class ResearchTests(unittest.TestCase):
+    def test_validated_hash_snapshot_joins_formal_ensemble(self):
+        from test_hash_research import example
+        training=[]
+        for period in range(1,801):
+            signal='1' if period%2 else '9'
+            training+=example(period,signal,2 if signal=='1' else 5)
+        snap=hash_research.train_snapshot(hash_research.build_examples(training))
+        self.assertTrue(snap['active'])
+        groups={str(r['group_no']):{'block':r['block_hash'],'singleCount':r['single_count']}
+                for r in example(801,'1',2) if r['group_no']<=17}
+        scope['research_model_performance']=lambda _:{}
+        result=scope['v9_research_ensemble'](groups,[3,4]*200,None,snap)
+        self.assertIn('hash_learned',result['components'])
+        self.assertGreater(result['weights']['hash_learned'],0)
+        self.assertEqual(result['research']['hashModel']['sample'],800)
+
     def test_outside_candidate_is_independent_of_formal_top3(self):
         scores={'0':1.0,'1':6.0,'2':17.0,'3':26.0,'4':28.0,
                 '5':18.0,'6':3.0,'7':1.0}

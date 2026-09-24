@@ -28,12 +28,13 @@
       </section>
 
       <section class="card ai-home-card v91-ai-card">
-        <div class="section-title">V9.3.4 多维AI决策中心</div>
+        <div class="section-title">V9.4 历史哈希多维分析</div>
         <div class="ai-hero">
           <div><small>最终综合结论</small><strong id="aiFinalDecision">分析中</strong><span id="aiEdgeStatus">等待17组数据</span></div>
           <div class="ai-top3-big" id="aiTop3">Top3：等待数据</div>
         </div>
         <div class="ai-outside" id="aiOutside">非3/4研究候选：等待本期预测锁定</div>
+        <div class="ai-hash-training" id="aiHashTraining">历史哈希训练：等待有效样本</div>
         <div class="ai-spectrum" id="aiSpectrum" aria-label="单0至单7的相对模型分数"></div>
         <div class="ai-model-grid" id="aiModelGrid"><div class="ai-model-item">多维模型正在建立本期快照…</div></div>
         <div class="ai-feedback">
@@ -236,6 +237,11 @@
     text('aiOutside',outside && outside.single!=null
       ?'非3/4研究候选：单'+outside.single+' · 相对分数 '+Number(outside.score).toFixed(2)+'%（独立展示，不另计命中）'
       :'非3/4研究候选：等待本期预测锁定');
+    var hm=dec.hashModel;
+    if(hm && hm.sample){
+      var hashStatus=hm.active?'留出期次优于基准，已合入预判':'留出期次未达门槛，暂不增加权重';
+      text('aiHashTraining','历史哈希：'+Number(hm.sample)+'个完整期次 · 留出验证'+Number(hm.testSample||0)+'期 · '+hashStatus);
+    }else text('aiHashTraining','历史哈希训练：等待足够的完整期次（至少400期）');
     var spectrum=document.getElementById('aiSpectrum'), spectrumHTML='';
     if(ai.frozen && spectrum){
       for(var si=0;si<8;si++){

@@ -11,6 +11,7 @@ import socket
 from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import hash_research
 
 try:
     import psycopg2
@@ -62,7 +63,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.3.4-multiclass-visibility-1'
+MODEL_VERSION = 'v9.4-historical-hash-research-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -574,6 +575,11 @@ def init_db():
                     )
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_period_groups_period ON period_groups(period_date DESC, period_no DESC)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_period_groups_complete ON period_groups(period_date DESC,period_no DESC) WHERE group_no=20")
+                cur.execute("""CREATE TABLE IF NOT EXISTS hash_model_runtime (
+                    singleton SMALLINT PRIMARY KEY CHECK (singleton=1),
+                    trained_through TEXT, snapshot JSONB NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS system_events (
                         id BIGSERIAL PRIMARY KEY,
@@ -1258,7 +1264,8 @@ def supervisor_worker():
     """Restart workers that exit. Heartbeats expose blocked workers for diagnosis."""
     targets={'db-writer':db_writer_worker,'tron-ingest':tron_ingest_worker,
              'target-result-fast':target_result_fast_worker,'g17-event':g17_event_worker,'ai-prediction':ai_prediction_worker,
-             'smart-db':smart_db_worker,'period-engine':autonomous_period_worker}
+             'smart-db':smart_db_worker,'period-engine':autonomous_period_worker,
+             'hash-research':hash_research_worker}
     while True:
         worker_touch('supervisor')
         for name,target in targets.items():
@@ -1290,6 +1297,63 @@ def smart_db_worker():
             with _runtime_health_lock:
                 _runtime_health['lastDbError']=str(exc)[:300]
         time.sleep(1.0)
+
+
+def get_hash_model_snapshot(current_key):
+    """One small shared DB read on the prediction path; never train here."""
+    conn=None
+    try:
+        conn=db_connect(retries=0)
+        if conn is None:return None
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT trained_through,snapshot FROM hash_model_runtime WHERE singleton=1")
+            row=cur.fetchone()
+        if not row or not row['trained_through'] or row['trained_through']>=current_key:return None
+        snap=row['snapshot']
+        return json.loads(snap) if isinstance(snap,str) else snap
+    except Exception:
+        return None
+    finally:
+        if conn is not None:db_release(conn)
+
+
+def hash_research_worker():
+    """Train from historical hashes in the background, outside the G17 deadline."""
+    time.sleep(15)
+    while True:
+        worker_touch('hash-research')
+        conn=None
+        try:
+            ds,p,_,_=current_period(); current_key=f'{ds}:{int(p):04d}'
+            conn=db_connect(retries=0)
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""WITH periods AS (
+                    SELECT period_key,period_date,period_no FROM period_groups
+                    WHERE group_no=20 AND period_key<%s
+                    ORDER BY period_date DESC,period_no DESC LIMIT 2500)
+                    SELECT g.period_key,g.group_no,g.block_hash,g.single_count
+                    FROM periods p JOIN period_groups g ON g.period_key=p.period_key
+                    WHERE g.group_no BETWEEN 1 AND 17 OR g.group_no=20
+                    ORDER BY p.period_date,p.period_no,g.group_no""",(current_key,))
+                rows=cur.fetchall()
+            db_release(conn);conn=None
+            snapshot=hash_research.train_snapshot(hash_research.build_examples(rows))
+            snapshot['sourceRows']=len(rows)
+            conn=db_connect(retries=0)
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("""INSERT INTO hash_model_runtime(singleton,trained_through,snapshot,updated_at)
+                        VALUES(1,%s,%s::jsonb,NOW()) ON CONFLICT(singleton) DO UPDATE
+                        SET trained_through=EXCLUDED.trained_through,snapshot=EXCLUDED.snapshot,
+                            updated_at=EXCLUDED.updated_at""",
+                        (snapshot.get('trainedThrough'),json.dumps(snapshot)))
+            record_system_event('hash_research_trained',current_key,
+                                {k:snapshot.get(k) for k in ('sample','testSample','active','baselineLoss','modelLoss')})
+        except Exception as exc:
+            worker_touch('hash-research',exc)
+        finally:
+            if conn is not None:db_release(conn)
+        time.sleep(300)
 
 
 def ai_prediction_worker():
@@ -1341,6 +1405,7 @@ def start_worker_once():
         _start_managed_worker('smart-db',smart_db_worker)
         _start_managed_worker('period-engine',autonomous_period_worker)
         _start_managed_worker('omission-engine',omission_engine_worker)
+        _start_managed_worker('hash-research',hash_research_worker)
         _start_managed_worker('supervisor',supervisor_worker)
 
 
@@ -1916,7 +1981,7 @@ def research_model_performance(limit=500):
     its group-20 result, so later verification can be used without label leakage.
     Scores are shrunk toward neutral when the sample is small.
     """
-    names=['long','short','structure17','transition','omission','hash_context','relation','binomial']
+    names=['long','short','structure17','transition','omission','hash_context','relation','binomial','hash_learned']
     perf={n:{'n':0,'top1':0,'top3':0,'pairedWins':0,'pairedLosses':0} for n in names}
     conn=db_connect()
     if conn is None: return perf
@@ -2007,7 +2072,7 @@ def _relation_scores(groups, relation):
             score[int(row['singleCount'])]+=max(0.0,rate)*3.0
     return _norm_scores(score)
 
-def v9_research_ensemble(groups, historical, relation=None):
+def v9_research_ensemble(groups, historical, relation=None, hash_snapshot=None):
     """V9 leakage-safe adaptive ensemble.
 
     `historical` is newest -> oldest. Candidate weights are learned only from
@@ -2053,6 +2118,8 @@ def v9_research_ensemble(groups, historical, relation=None):
     relation_s=_relation_scores(groups,relation)
     parts={'long':long_s,'short':short_s,'structure17':struct,'transition':trans,
            'omission':omit,'hash_context':hash_context,'relation':relation_s,'binomial':binomial}
+    learned_scores=hash_research.snapshot_scores(hash_snapshot,groups)
+    if learned_scores is not None: parts['hash_learned']=learned_scores
 
     perf=research_model_performance(500)
     # Explicitly exploratory prior: use current, pre-result information even
@@ -2063,6 +2130,7 @@ def v9_research_ensemble(groups, historical, relation=None):
     # Verified paired lift can add a limited bonus. Poor or unverified models
     # keep their small exploratory prior rather than masquerading as proven.
     raww=dict(prior)
+    if learned_scores is not None:raww['hash_learned']=0.35
     for n in parts:
         if n=='binomial': continue
         st=perf.get(n,{})
@@ -2078,7 +2146,7 @@ def v9_research_ensemble(groups, historical, relation=None):
 
     # Descriptive paired evidence only; selecting the best of several candidates
     # still makes these labels exploratory rather than a predictive guarantee.
-    complex_names=['long','short','structure17','transition','omission','hash_context','relation']
+    complex_names=['long','short','structure17','transition','omission','hash_context','relation','hash_learned']
     tested=[perf[n] for n in complex_names if perf.get(n,{}).get('n',0)>=100]
     baseline_perf=perf.get('binomial',{})
     best_complex=max((x.get('top1Rate') or 0 for x in tested),default=0)
@@ -2091,9 +2159,11 @@ def v9_research_ensemble(groups, historical, relation=None):
     return {'single':order[0],'top3':order[:3],
             'scores':{str(i):round(score[i]*100,3) for i in range(8)},
             'confidence':round(confidence,1),'weights':weights,'components':parts,
-            'research':{'mode':'exploratory_with_paired_oos','window':500,'performance':perf,
+            'research':{'mode':'hash_history_with_paired_oos','window':500,'performance':perf,
                         'edgeStatus':edge,'bestComplexTop1':round(best_complex,2),
-                        'baselineTop1':round(base_rate,2),'weightMode':'exploratory_prior_plus_verified_bonus'}}
+                        'baselineTop1':round(base_rate,2),'weightMode':'exploratory_prior_plus_verified_bonus',
+                        'hashModel':{k:hash_snapshot.get(k) for k in ('status','sample','testSample','trainedThrough','baselineLoss','modelLoss','active')}
+                                    if hash_snapshot else None}}
 
 def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None, force_backend=False):
     """Lock a pre-result prediction.
@@ -2129,7 +2199,8 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
     # The production prediction is the V9 rolling out-of-sample research ensemble.  It uses only data
     # available before group20.  Do this before any nonessential analytics.
     relation_pre=group20_relation_model(date_str, period)
-    v7=v9_research_ensemble(groups,historical,relation_pre)
+    hash_snapshot=get_hash_model_snapshot(key)
+    v7=v9_research_ensemble(groups,historical,relation_pre,hash_snapshot)
     ai=int(v7['single'])
     top3=[int(x) for x in v7['top3']]
     highest=stats.get('highest') or []
@@ -2294,12 +2365,13 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
             except Exception: ensemble_detail={}
     elif pending: ensemble_detail=pending.get('ensemble') or {}
     if not ensemble_detail and all(str(i) in groups for i in range(1,18)):
-        try: ensemble_detail=v9_research_ensemble(groups,historical,relation)
+        try: ensemble_detail=v9_research_ensemble(groups,historical,relation,get_hash_model_snapshot(key))
         except Exception: ensemble_detail={}
     component_view=[]
-    label_map={'long':'长期分布','short':'短期趋势','structure17':'17组结构','transition':'状态转移','omission':'遗漏条件','hash_context':'哈希结构','relation':'位置关联','binomial':'基础分布'}
+    label_map={'long':'长期分布','short':'短期趋势','structure17':'17组结构','transition':'状态转移','omission':'遗漏条件','hash_context':'哈希结构','hash_learned':'历史哈希模型','relation':'位置关联','binomial':'基础分布'}
     comps=ensemble_detail.get('components') or {}; weights=ensemble_detail.get('weights') or {}; perf=(ensemble_detail.get('research') or {}).get('performance') or {}
-    for name in ['structure17','hash_context','relation','short','long','transition','omission','binomial']:
+    for name in ['hash_learned','structure17','hash_context','relation','short','long','transition','omission','binomial']:
+        if name=='hash_learned' and name not in comps:continue
         sm=comps.get(name) or {}
         try: rank=_candidate_rank({int(k):float(v) for k,v in sm.items()})
         except Exception: rank=[]
@@ -2313,6 +2385,7 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
     decision={'edgeStatus':research.get('edgeStatus','NO_EDGE'),'confidence':ensemble_detail.get('confidence'),
               'components':component_view,'windows':{str(k):v for k,v in windows.items()},
               'outsideCandidate':outside_candidate(ensemble_detail.get('scores')) if (row or pending) else None,
+              'hashModel':research.get('hashModel'),
               'baselineTop1':research.get('baselineTop1'),'bestComplexTop1':research.get('bestComplexTop1'),
               'note':'综合排序含固定的探索性权重；Top3百分比是相对模型分数，并非实际命中概率。经同批样本验证优于基础分布的模型才获得额外权重；仅统计开奖前锁定记录。'}
     result={'single':ai_single,'scores':scores,'historicalSample':len(historical),
