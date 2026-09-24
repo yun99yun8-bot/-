@@ -73,3 +73,9 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
   .history20-item { min-height: 50px; }
   .history20-item strong { font-size: 11px; }
 }
+
+
+/* 实时新增组高亮：旧数据保持白色，新读取组高亮5秒后自动恢复 */
+.group-table tbody tr{background:#fff;transition:background-color .35s ease,box-shadow .35s ease}
+.group-table tbody tr.new-group-row{background:#fff1b8;box-shadow:inset 4px 0 0 #f0a500}
+.group-table tbody tr.new-group-row td{font-weight:800}

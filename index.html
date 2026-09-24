@@ -124,14 +124,29 @@
     for(var j=0;j<highest.length;j++)names.push('单'+highest[j].single);
     text('statsConclusion',highest.length?'结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）':'结论：等待第1～18组数据');
   }
-  function renderGroups(groups){
+  var groupSeenKeys={};
+  var groupHighlightUntil={};
+  var groupsInitialized=false;
+  var activeGroupPeriodKey=null;
+  function renderGroups(groups, periodKey){
     var body=document.getElementById('groupTableBody'), map={}; groups=Array.isArray(groups)?groups:[];
-    for(var i=0;i<groups.length;i++)map[Number(groups[i].group)]=groups[i];
+    periodKey=String(periodKey||'');
+    if(activeGroupPeriodKey!==periodKey){ groupSeenKeys={}; groupHighlightUntil={}; groupsInitialized=false; activeGroupPeriodKey=periodKey; }
+    var now=new Date().getTime();
+    for(var i=0;i<groups.length;i++){
+      var gi=groups[i], gn=Number(gi.group), key=periodKey+'|'+gn+'|'+String(gi.blockNumber==null?'':gi.blockNumber);
+      map[gn]=gi;
+      if(groupsInitialized && !groupSeenKeys[key]) groupHighlightUntil[key]=now+5000;
+      groupSeenKeys[key]=true;
+    }
+    groupsInitialized=true;
     var html='';
     for(var n=1;n<=20;n++){
       var g=map[n], block=g&&g.blockNumber!=null?g.blockNumber:'--', single=g&&g.singleCount!=null?'单'+g.singleCount:'--';
       var nums=g&&Array.isArray(g.numbers)&&g.numbers.length?g.numbers.join(' '):'--';
-      html+='<tr><td>第'+n+'组</td><td>'+block+'</td><td>'+single+'</td><td>'+nums+'</td></tr>';
+      var rowKey=g?periodKey+'|'+n+'|'+String(g.blockNumber==null?'':g.blockNumber):'';
+      var rowClass=(rowKey && groupHighlightUntil[rowKey] && groupHighlightUntil[rowKey]>now)?' class="new-group-row"':'';
+      html+='<tr'+rowClass+'><td>第'+n+'组</td><td>'+block+'</td><td>'+single+'</td><td>'+nums+'</td></tr>';
     }
     body.innerHTML=html;
   }
@@ -147,7 +162,7 @@
     box.innerHTML=html;
   }
   function render(data){
-    renderStats(data); renderGroups(data.groups||[]); renderOmission(data); renderHistory(data);
+    renderStats(data); renderGroups(data.groups||[],data.groupPeriodKey||data.currentPeriod||data.period||''); renderOmission(data); renderHistory(data);
     var result=(data.result&&Array.isArray(data.result.numbers))?data.result:null;
     var nums=result?result.numbers:(Array.isArray(data.resultNumbers)?data.resultNumbers:(Array.isArray(data.numbers)?data.numbers:[]));
     text('periodValue',(result&&result.platformPeriod)||data.resultPlatformPeriod||data.platformPeriod||data.currentPeriod||data.period||'0000000000');
