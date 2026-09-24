@@ -62,7 +62,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.0-research-ai-walkforward-1'
+MODEL_VERSION = 'v9.1-multidimensional-research-ai-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -1861,7 +1861,7 @@ def research_model_performance(limit=500):
     its group-20 result, so later verification can be used without label leakage.
     Scores are shrunk toward neutral when the sample is small.
     """
-    names=['long','short','structure17','transition','omission','binomial']
+    names=['long','short','structure17','transition','omission','hash_context','relation','binomial']
     perf={n:{'n':0,'top1':0,'top3':0} for n in names}
     conn=db_connect()
     if conn is None: return perf
@@ -1892,6 +1892,48 @@ def research_model_performance(limit=500):
         v['top3Rate']=round(v['top3']/nn*100,2) if nn else None
     return perf
 
+
+def _hash_context_scores(groups):
+    """Pre-result hash-context model using only current groups 1..17.
+
+    This is a diagnostic feature model, not a claim that a cryptographic hash has
+    a predictable formula. It summarizes A-E/digit composition, right-tail
+    structure and the platform-derived single counts already available before G20.
+    It earns production weight only through stored out-of-sample verification.
+    """
+    score={i:1.0 for i in range(8)}
+    letter_odd=0; digit_odd=0; pairs=0
+    for g in range(1,18):
+        row=groups.get(str(g)) or {}
+        h=str(row.get('block') or row.get('block_hash') or '').upper()
+        if not h: continue
+        rev=h[::-1]
+        letters=[c for c in rev if c in 'ABCDE'][:7]
+        digits=[c for c in rev if c.isdigit()][:7]
+        for c in letters: letter_odd += (ord(c)-ord('A')) % 2
+        for c in digits: digit_odd += int(c) % 2
+        pairs += min(len(letters),len(digits))
+        if row.get('singleCount') is not None:
+            score[int(row['singleCount'])]+=1.5
+    # Tiny composition signal; OOS weighting decides whether it deserves influence.
+    if pairs:
+        ratio=(letter_odd+digit_odd)/max(1,2*pairs)
+        center=max(0,min(7,round(ratio*7)))
+        score[center]+=0.75
+        if center>0: score[center-1]+=0.25
+        if center<7: score[center+1]+=0.25
+    return _norm_scores(score)
+
+
+def _relation_scores(groups, relation):
+    score={i:1.0 for i in range(8)}
+    for item in ((relation or {}).get('ranking') or [])[:6]:
+        try: g=int(item.get('group') or 0); rate=float(item.get('matchRate') or 0)/100.0
+        except Exception: continue
+        row=groups.get(str(g)) or {}
+        if row.get('singleCount') is not None:
+            score[int(row['singleCount'])]+=max(0.0,rate)*3.0
+    return _norm_scores(score)
 
 def v9_research_ensemble(groups, historical, relation=None):
     """V9 leakage-safe adaptive ensemble.
@@ -1935,8 +1977,10 @@ def v9_research_ensemble(groups, historical, relation=None):
 
     binomial_raw=[1,7,21,35,35,21,7,1]
     binomial={i:binomial_raw[i]/128.0 for i in range(8)}
+    hash_context=_hash_context_scores(groups)
+    relation_s=_relation_scores(groups,relation)
     parts={'long':long_s,'short':short_s,'structure17':struct,'transition':trans,
-           'omission':omit,'binomial':binomial}
+           'omission':omit,'hash_context':hash_context,'relation':relation_s,'binomial':binomial}
 
     perf=research_model_performance(500)
     # Neutral prior + out-of-sample evidence. Top1 matters most; Top3 is secondary.
@@ -1956,7 +2000,7 @@ def v9_research_ensemble(groups, historical, relation=None):
 
     # Evidence flag is descriptive, not a guarantee: compare candidate OOS Top1
     # with the strongest simple reference observed so far.
-    complex_names=['long','short','structure17','transition','omission']
+    complex_names=['long','short','structure17','transition','omission','hash_context','relation']
     tested=[perf[n] for n in complex_names if perf.get(n,{}).get('n',0)>=30]
     baseline_perf=perf.get('binomial',{})
     best_complex=max((x.get('top1Rate') or 0 for x in tested),default=0)
@@ -2006,7 +2050,8 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
 
     # The production prediction is the V9 rolling out-of-sample research ensemble.  It uses only data
     # available before group20.  Do this before any nonessential analytics.
-    v7=v9_research_ensemble(groups,historical)
+    relation_pre=group20_relation_model(date_str, period)
+    v7=v9_research_ensemble(groups,historical,relation_pre)
     ai=int(v7['single'])
     top3=[int(x) for x in v7['top3']]
     highest=stats.get('highest') or []
@@ -2082,11 +2127,14 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
             flush_pending_ai_predictions()
         except Exception:
             pass
-    conn=db_connect(); row=None; agg=None; latest_verified=None
+    conn=db_connect(); row=None; agg=None; latest_verified=None; verified_rows=[]
     if conn is not None:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT * FROM ai_predictions WHERE period_key=%s",(key,)); row=cur.fetchone()
+                cur.execute("""SELECT ai_analysis,prediction_top3,actual_single,ensemble_detail FROM ai_predictions
+                    WHERE actual_single IS NOT NULL ORDER BY period_date DESC,period_no DESC LIMIT 500""")
+                verified_rows=cur.fetchall()
                 cur.execute("""SELECT COUNT(*) FILTER (WHERE actual_single IS NOT NULL) verified,
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND ai_analysis=actual_single) ai_hits,
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND prediction_top3 @> to_jsonb(ARRAY[actual_single])) top3_hits,
@@ -2137,13 +2185,53 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
         actual=int(latest_verified['actual_single'])
         hit_position=(pred.index(actual)+1) if actual in pred else None
         latest_result={'period':int(latest_verified['period_no']), 'top3':pred, 'actual':actual, 'hit':bool(hit_position), 'hitPosition':hit_position}
+    # V9.1 decision dashboard: only verified, pre-result snapshots count.
+    windows={20:{'n':0,'hit':0,'top3':0},100:{'n':0,'hit':0,'top3':0},500:{'n':0,'hit':0,'top3':0}}
+    for idx,vrw in enumerate(verified_rows or []):
+        try:
+            actual=int(vrw['actual_single']); pred=int(vrw['ai_analysis']); tp=vrw.get('prediction_top3') or []
+            if isinstance(tp,str): tp=json.loads(tp)
+            tp=[int(x) for x in tp]
+        except Exception: continue
+        for w in windows:
+            if idx < w:
+                windows[w]['n']+=1; windows[w]['hit']+=int(pred==actual); windows[w]['top3']+=int(actual in tp[:3])
+    for w,v in windows.items():
+        v['top1Rate']=round(v['hit']/v['n']*100,2) if v['n'] else None
+        v['top3Rate']=round(v['top3']/v['n']*100,2) if v['n'] else None
+    ensemble_detail={}
+    if row and row.get('ensemble_detail') is not None:
+        ensemble_detail=row.get('ensemble_detail') or {}
+        if isinstance(ensemble_detail,str):
+            try: ensemble_detail=json.loads(ensemble_detail)
+            except Exception: ensemble_detail={}
+    elif pending: ensemble_detail=pending.get('ensemble') or {}
+    if not ensemble_detail and all(str(i) in groups for i in range(1,18)):
+        try: ensemble_detail=v9_research_ensemble(groups,historical,relation)
+        except Exception: ensemble_detail={}
+    component_view=[]
+    label_map={'long':'长期分布','short':'短期趋势','structure17':'17组结构','transition':'状态转移','omission':'遗漏条件','hash_context':'哈希结构','relation':'位置关联','binomial':'基础分布'}
+    comps=ensemble_detail.get('components') or {}; weights=ensemble_detail.get('weights') or {}; perf=(ensemble_detail.get('research') or {}).get('performance') or {}
+    for name in ['structure17','hash_context','relation','short','long','transition','omission','binomial']:
+        sm=comps.get(name) or {}
+        try: rank=_candidate_rank({int(k):float(v) for k,v in sm.items()})
+        except Exception: rank=[]
+        st=perf.get(name) or {}
+        component_view.append({'key':name,'label':label_map[name],'single':rank[0] if rank else None,
+                               'weight':round(float(weights.get(name,0))*100,1),'sample':int(st.get('n') or 0),
+                               'top1Rate':st.get('top1Rate'),'top3Rate':st.get('top3Rate')})
+    research=ensemble_detail.get('research') or {}
+    decision={'edgeStatus':research.get('edgeStatus','NO_EDGE'),'confidence':ensemble_detail.get('confidence'),
+              'components':component_view,'windows':{str(k):v for k,v in windows.items()},
+              'baselineTop1':research.get('baselineTop1'),'bestComplexTop1':research.get('bestComplexTop1'),
+              'note':'只使用开奖前可见数据；哈希结构只作为统计特征，必须经样本外验证后才获得权重。'}
     result={'single':ai_single,'scores':scores,'historicalSample':len(historical),
             'frozen':bool(row or pending),'period':int(row['period_no']) if row else int(period),
             'top3':display_top3,'verifiedSample':verified,'hits':hits,
             'top3Hits':top3_hits,'top3HitRate':round(top3_hits/verified*100,2) if verified else None,'latestVerified':latest_result,
             'hitRate':round(hits/verified*100,2) if verified else None,
             'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,
-            'relationTop3':relation_top3,'relationSample':relation.get('samplePeriods',0)}
+            'relationTop3':relation_top3,'relationSample':relation.get('samplePeriods',0),'decision':decision}
     with _ai_summary_cache_lock:
         _ai_summary_cache.update({'key':key,'at':time.time(),'value':dict(result)})
     return result

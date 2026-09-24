@@ -27,18 +27,22 @@
         </div>
       </section>
 
-      <section class="card ai-home-card">
-        <div class="section-title">AI分析结论</div>
-        <div class="conclusion primary-conclusion" id="statsConclusion">AI结论：正在收集前17组数据</div>
-        <div class="conclusion" id="aiAnalysisLine">AI分析：正在分析中…</div>
-        <div class="ai-panel">
-          <div class="ai-result-box" id="aiVerifyResult">预测验证：等待已开奖预测</div>
-          <div class="ai-lines">
-            <div class="ai-predict-line" id="aiTop3">本期AI预测前三：等待数据</div>
-            <div class="ai-relation-line" id="relationTop3">历史高关联组次：等待数据</div>
-          </div>
+      <section class="card ai-home-card v91-ai-card">
+        <div class="section-title">V9.1 多维AI决策中心</div>
+        <div class="ai-hero">
+          <div><small>最终综合结论</small><strong id="aiFinalDecision">分析中</strong><span id="aiEdgeStatus">等待17组数据</span></div>
+          <div class="ai-top3-big" id="aiTop3">Top3：等待数据</div>
         </div>
-        <div class="stats-note" id="aiAccuracy">AI历史验证：暂无已验证样本</div>
+        <div class="ai-model-grid" id="aiModelGrid"><div class="ai-model-item">多维模型正在建立本期快照…</div></div>
+        <div class="ai-feedback">
+          <div class="ai-feedback-title">真实样本外命中反馈</div>
+          <div class="ai-feedback-grid" id="aiFeedbackGrid"><span>最近20期 --</span><span>最近100期 --</span><span>累计 --</span></div>
+          <div class="ai-baseline" id="aiBaseline">只统计开奖前已锁定预测</div>
+        </div>
+        <div class="ai-result-box" id="aiVerifyResult">预测验证：等待已开奖预测</div>
+        <div class="ai-relation-line" id="relationTop3">历史高关联组次：等待数据</div>
+        <div class="ai-research-note" id="aiResearchNote">哈希、17组、遗漏、转移、长短期与位置关联均需通过样本外验证后才进入最终权重。</div>
+        <div id="statsConclusion" hidden></div><div id="aiAnalysisLine" hidden></div><div id="aiAccuracy" hidden></div>
       </section>
 
       <section class="card omission-card">
@@ -221,7 +225,20 @@
     }else{
       for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
     }
-    text('aiTop3',topParts.length?'本期AI预测前三：'+topParts.join('　'):'本期AI预测前三：正在分析中…');
+    text('aiTop3',topParts.length?'Top3：'+topParts.join('　'):'Top3：正在分析中…');
+    var dec=ai.decision||{}, edge=String(dec.edgeStatus||'NO_EDGE');
+    var edgeCN=edge==='EVIDENCE'?'统计证据较强':(edge==='WEAK_EDGE'?'存在弱优势':'暂无统计优势');
+    text('aiFinalDecision',(ai.frozen&&aiSingle!==null)?('单'+aiSingle):(c17Exact?'等待正式锁定':'分析中'));
+    text('aiEdgeStatus',edgeCN+(dec.confidence!=null?' · 一致度 '+Number(dec.confidence).toFixed(1)+'%':''));
+    var comps=Array.isArray(dec.components)?dec.components:[], mh='';
+    for(var mi=0;mi<comps.length;mi++){var mc=comps[mi], ms=(mc.single===0||mc.single)?('单'+mc.single):'--', rr=mc.top1Rate!=null?Number(mc.top1Rate).toFixed(1)+'%':'积累中'; mh+='<div class=\"ai-model-item\"><b>'+mc.label+'</b><strong>'+ms+'</strong><small>权重 '+Number(mc.weight||0).toFixed(1)+'% · OOS '+rr+'</small></div>';}
+    if(mh)document.getElementById('aiModelGrid').innerHTML=mh;
+    var ww=dec.windows||{}, w20=ww['20']||{},w100=ww['100']||{},w500=ww['500']||{};
+    function wr(v){return v&&v.n?(v.hit+'/'+v.n+' · '+Number(v.top1Rate||0).toFixed(1)+'%'):'样本积累中';}
+    document.getElementById('aiFeedbackGrid').innerHTML='<span>最近20期 <b>'+wr(w20)+'</b></span><span>最近100期 <b>'+wr(w100)+'</b></span><span>最近500期 <b>'+wr(w500)+'</b></span>';
+    var base=dec.baselineTop1!=null?Number(dec.baselineTop1).toFixed(2)+'%':'积累中', best=dec.bestComplexTop1!=null?Number(dec.bestComplexTop1).toFixed(2)+'%':'积累中';
+    text('aiBaseline','基准模型Top1：'+base+' · 当前最佳复杂模型：'+best+' · 仅统计开奖前锁定记录');
+    if(dec.note)text('aiResearchNote',dec.note);
     var rel=Array.isArray(ai.relationTop3)?ai.relationTop3:[], relParts=[];
     for(var ri=0;ri<rel.length;ri++){
       var cs=(rel[ri].currentSingle===0||rel[ri].currentSingle)?('单'+rel[ri].currentSingle):'等待';
