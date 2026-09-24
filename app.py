@@ -5,6 +5,8 @@ import json
 import os
 import time
 import threading
+import socket
+from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -565,6 +567,75 @@ def draw():
     except Exception as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 502
 
+
+
+@app.get('/api/db-check')
+def db_check():
+    """Safe database connectivity diagnostics. Never returns credentials."""
+    result = {
+        'ok': False,
+        'databaseUrlConfigured': bool(DATABASE_URL),
+        'driverAvailable': psycopg2 is not None,
+        'dns': {'ok': False},
+        'tcp5432': {'ok': False},
+        'postgresql': {'ok': False},
+    }
+    if not DATABASE_URL:
+        result['error'] = 'DATABASE_URL is not configured'
+        return jsonify(result), 503
+    if psycopg2 is None:
+        result['error'] = 'psycopg2 is not available'
+        return jsonify(result), 503
+
+    try:
+        parsed = urlparse(DATABASE_URL)
+        host = parsed.hostname
+        port = parsed.port or 5432
+        result['host'] = host
+        result['port'] = port
+        result['database'] = (parsed.path or '').lstrip('/') or None
+    except Exception as exc:
+        result['error'] = 'DATABASE_URL parse failed: ' + type(exc).__name__
+        return jsonify(result), 500
+
+    try:
+        ip = socket.gethostbyname(host)
+        result['dns'] = {'ok': True, 'ip': ip}
+    except Exception as exc:
+        result['dns'] = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'}
+        result['error'] = 'DNS lookup failed'
+        return jsonify(result), 502
+
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            pass
+        result['tcp5432'] = {'ok': True}
+    except Exception as exc:
+        result['tcp5432'] = {'ok': False, 'error': f'{type(exc).__name__}: {exc}'}
+        result['error'] = 'TCP connection to PostgreSQL failed'
+        return jsonify(result), 502
+
+    conn = None
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute('SELECT 1')
+            cur.fetchone()
+        result['postgresql'] = {'ok': True}
+        result['ok'] = True
+        return jsonify(result)
+    except Exception as exc:
+        # Do not echo DATABASE_URL or credentials.
+        msg = str(exc).replace(DATABASE_URL, '[DATABASE_URL]')
+        result['postgresql'] = {'ok': False, 'error': msg}
+        result['error'] = 'PostgreSQL login/query failed'
+        return jsonify(result), 502
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 @app.get('/api/history')
 def history():
