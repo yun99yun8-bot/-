@@ -16,7 +16,7 @@
     <main class="content home-dashboard" id="tornContent">
       <section class="card hero-card">
         <div class="result-head">
-          <div class="section-title result-title-line">开奖结果 <span class="countdown" id="countdown">--</span></div><div class="home-live-status" id="homeLiveStatus">实时数据连接中…</div>
+          <div class="section-title result-title-line">开奖结果 <span class="countdown" id="countdown">--</span></div>
           <div class="draw-meta">
             <span class="single-badge"><strong id="singleValue">待开奖</strong></span>
             <span class="period-badge">第 <strong id="periodValue">0000000000</strong> 期<br><small>区块：<span id="blockValue">--</span></small></span>
@@ -292,6 +292,17 @@
   }
   var fixedResult=null;
   var lastAcceptedResultPeriod='';
+  var greenWaves=new Set([5,6,11,16,17,21,22,27,28,32,33,38,39,43,44,49]);
+  var blueWaves=new Set([3,4,9,10,14,15,20,25,26,31,36,37,41,42,47,48]);
+  var redWaves=new Set([1,2,7,8,12,13,18,19,23,24,29,30,34,35,40,45,46]);
+  function waveForNumber(value){
+    var n=Number(value);
+    if(!Number.isInteger(n)||n<1||n>49)return null;
+    if(greenWaves.has(n))return 'green';
+    if(blueWaves.has(n))return 'blue';
+    if(redWaves.has(n))return 'red';
+    return null;
+  }
   function singleFromNumbers(nums){
     if(!Array.isArray(nums)||nums.length!==7)return null;
     var count=0;
@@ -326,7 +337,13 @@
     r.single=single;
     text('periodValue',r.period); text('singleValue','单'+single); text('blockValue',r.block);
     var boxes=document.querySelectorAll('[data-result]');
-    for(var i=0;i<boxes.length;i++) boxes[i].textContent=r.numbers[i]!=null?r.numbers[i]:'--';
+    for(var i=0;i<boxes.length;i++){
+      var box=boxes[i], value=r.numbers[i], wave=waveForNumber(value);
+      box.classList.remove('wave-green','wave-blue','wave-red');
+      if(wave)box.classList.add('wave-'+wave);
+      box.textContent=wave?String(value).padStart(2,'0'):'--';
+      box.setAttribute('aria-label',wave?('第'+(i+1)+'位 '+box.textContent+' '+({green:'绿波',blue:'蓝波',red:'红波'}[wave])):'第'+(i+1)+'位待开奖');
+    }
   }
   function renderFixedResult(data){
     var c=candidateResult(data);
@@ -350,12 +367,6 @@
     }
     if(lastRenderPeriod && rp && lastRenderPeriod!==rp){ lastGoodAI=null; lastGoodAIPeriod=''; aiLockConfirmedMinute=''; }
     if(rp) lastRenderPeriod=rp;
-    var status=document.getElementById('homeLiveStatus');
-    if(status){
-      if(data.stale){ status.textContent='数据连接恢复中 · 已保留最后有效结果'; status.className='home-live-status warn'; }
-      else if(data.officialReady){ status.textContent='本期正式结果已确认'; status.className='home-live-status ready'; }
-      else { status.textContent='实时采集中 · 等待本期正式开奖'; status.className='home-live-status'; }
-    }
     renderStats(data); renderGroups(data.groups||[],data.groupPeriodKey||data.currentPeriod||data.period||''); renderOmission(data); renderHistory(data);
     renderFixedResult(data);
   }

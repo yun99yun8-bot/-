@@ -20,7 +20,10 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .period-badge{padding:7px 11px;border-radius:9px;background:#fff1e7;color:#a94b08;font-size:13px;white-space:nowrap}
 .period-badge strong{font-size:16px}
 .result-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
-.result-box{height:54px;border-radius:50%;background:#eef1f5;color:#24324b;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:800;border:1px solid #dce2ea}
+.result-box{box-sizing:border-box;width:min(100%,54px);aspect-ratio:1;justify-self:center;border-radius:50%;background:#fff;color:#445168;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:800;border:3px solid #dce2ea}
+.result-box.wave-green{border-color:#78c887}
+.result-box.wave-blue{border-color:#80a9ee}
+.result-box.wave-red{border-color:#cc6167}
 .content>.card:nth-child(2){border-color:#8b4de8;padding:10px 12px;margin-bottom:10px}
 .content>.card:nth-child(2) .section-title{color:#5d25a8;margin-bottom:8px;font-size:16px}
 .omission-grid{display:grid;grid-template-columns:repeat(8,1fr);gap:5px}
@@ -30,7 +33,7 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .content>.card:nth-child(3){border-color:#2196f3}
 .content>.card:nth-child(3) .section-title{color:#1b67aa}
 .table-placeholder{min-height:180px;background:#f8fbff}
-@media(max-width:360px){.content{padding:2px 8px 12px}.topbar,.page-tabs{margin-left:8px;margin-right:8px}.card{padding:12px}.omission-grid{gap:4px}.stat{font-size:12px;padding:7px 1px}.stat small{font-size:9px;margin-top:2px}.result-grid{gap:5px}.result-box{height:43px;font-size:15px}.period-badge{font-size:12px;padding:6px 8px}}
+@media(max-width:360px){.content{padding:2px 8px 12px}.topbar,.page-tabs{margin-left:8px;margin-right:8px}.card{padding:12px}.omission-grid{gap:4px}.stat{font-size:12px;padding:7px 1px}.stat small{font-size:9px;margin-top:2px}.result-grid{gap:5px}.result-box{width:min(100%,43px);font-size:15px}.period-badge{font-size:12px;padding:6px 8px}}
 
 .stats-card{border-color:#e91e63;padding:11px 12px;margin-bottom:10px}
 .stats-card .section-title{color:#c2185b;margin-bottom:8px;font-size:16px}
@@ -133,7 +136,7 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 @media(max-width:380px){.history-hero{padding:16px 13px}.history-hero-badge{flex-basis:62px;height:62px;font-size:16px}.history-nav-card{min-height:140px;padding:12px}.history-nav-card strong{font-size:13px}.history-nav-card small{font-size:9px}}
 
 /* Home reliability/status refinements */
-.home-live-status{font-size:12px;color:#64748b;margin-top:4px;font-weight:600}.home-live-status.ready{color:#16803c}.home-live-status.warn{color:#b45309}.home-dashboard .card{overflow:hidden}.home-recent20 .history20-grid{margin-top:10px}
+.home-dashboard .card{overflow:hidden}.home-recent20 .history20-grid{margin-top:10px}
 
 /* 2026-09 home mobile cleanup: recent 20 fixed 5 x 4, no horizontal scrolling */
 .home-dashboard{width:100%;max-width:760px;margin:0 auto;padding-left:max(10px,env(safe-area-inset-left));padding-right:max(10px,env(safe-area-inset-right));box-sizing:border-box}
