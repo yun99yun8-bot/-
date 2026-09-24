@@ -16,7 +16,7 @@
     <main class="content home-dashboard" id="tornContent">
       <section class="card hero-card">
         <div class="result-head">
-          <div class="section-title result-title-line">开奖结果 <span class="countdown" id="countdown">--</span></div>
+          <div class="section-title result-title-line">开奖结果 <span class="countdown" id="countdown">--</span></div><div class="home-live-status" id="homeLiveStatus">实时数据连接中…</div>
           <div class="draw-meta">
             <span class="single-badge">单<strong id="singleValue">--</strong></span>
             <span class="period-badge">第 <strong id="periodValue">0000000000</strong> 期<br><small>区块：<span id="blockValue">--</span></small></span>
@@ -39,7 +39,6 @@
           </div>
         </div>
         <div class="stats-note" id="aiAccuracy">AI历史验证：暂无已验证样本</div>
-        <div class="stats-note" id="group20Matches">与第20组相同：等待第20组</div>
       </section>
 
       <section class="card omission-card">
@@ -154,8 +153,12 @@
   var currentCountdownValue=60;
   // UI last-good cache: transient empty API fields must never blank valid analysis.
   var lastGoodAI=null;
+  var lastGoodAIPeriod='';
   var lastGoodStats=null;
+  var lastRenderPeriod='';
   function renderStats(data){
+    var currentP=String(data.currentPeriod||'').padStart(4,'0');
+    if(lastGoodAIPeriod && currentP && lastGoodAIPeriod!==currentP){ lastGoodAI=null; }
     var incomingStats=data.dataStats||{};
     if(Array.isArray(incomingStats.stats) && incomingStats.stats.length){ lastGoodStats=incomingStats; }
     var ds=(Array.isArray(incomingStats.stats)&&incomingStats.stats.length)?incomingStats:(lastGoodStats||incomingStats); var rows=Array.isArray(ds.stats)?ds.stats:[];
@@ -170,7 +173,6 @@
     // Conclusion is now a separate 17-group AI model. Raw frequency boxes above
     // remain descriptive statistics and are not presented as a prediction.
     var c17=data.aiConclusion17||null;
-    var currentP=String(data.currentPeriod||'').padStart(4,'0');
     var c17P=c17?String(c17.period||'').padStart(4,'0'):'';
     var c17Exact=!!(c17 && c17P===currentP && Array.isArray(c17.sourceBlocks) && c17.sourceBlocks.length===17);
     if(c17Exact && (c17.single===0 || c17.single)){
@@ -181,7 +183,9 @@
     var incomingAI=data.aiAnalysis||{};
     var incomingScores=incomingAI.scores||{};
     var incomingValid=(incomingAI.single===0||!!incomingAI.single||Object.keys(incomingScores).length>0||Array.isArray(incomingAI.top3)&&incomingAI.top3.length>0);
-    if(incomingValid){ lastGoodAI=incomingAI; }
+    var incomingPeriod=String(incomingAI.period||data.currentPeriod||'').padStart(4,'0');
+    if(incomingValid && incomingPeriod===currentP){ lastGoodAI=incomingAI; lastGoodAIPeriod=currentP; }
+    else if(incomingPeriod!==currentP){ incomingValid=false; }
     var ai=incomingValid?incomingAI:(lastGoodAI||incomingAI), scoreMap=ai.scores||{}, ranked=[];
     var aiSingle=(ai.single===0||ai.single)?ai.single:null;
     var aiPeriod=Number(ai.period||data.currentPeriod||data.period||0);
@@ -200,8 +204,11 @@
     }
     text('aiTop3',topParts.length?'本期AI预测前三：'+topParts.join('　'):'本期AI预测前三：正在分析中…');
     var rel=Array.isArray(ai.relationTop3)?ai.relationTop3:[], relParts=[];
-    for(var ri=0;ri<rel.length;ri++) relParts.push('第'+rel[ri].group+'组 '+Number(rel[ri].matchRate||0).toFixed(2)+'%');
-    text('relationTop3',relParts.length?'历史高关联组次：'+relParts.join('　'):'历史高关联组次：等待数据');
+    for(var ri=0;ri<rel.length;ri++){
+      var cs=(rel[ri].currentSingle===0||rel[ri].currentSingle)?('单'+rel[ri].currentSingle):'等待';
+      relParts.push('第'+rel[ri].group+'组 '+cs+' · '+Number(rel[ri].matchRate||0).toFixed(2)+'%');
+    }
+    text('relationTop3',relParts.length?'历史高关联组次：'+relParts.join('　｜　'):'历史高关联组次：等待数据');
     var vr=ai.latestVerified;
     if(vr && Array.isArray(vr.top3)){
       var parts=[];
@@ -215,8 +222,6 @@
     var verified=Number(ai.verifiedSample||0), th=Number(ai.top3Hits||0);
     var tr=ai.top3HitRate!=null?Number(ai.top3HitRate).toFixed(2)+'%':'--';
     text('aiAccuracy','AI前三验证：'+th+'/'+verified+'（'+tr+'）');
-    var same=Array.isArray(ai.sameAsGroup20)?ai.sameAsGroup20:[];
-    text('group20Matches',same.length?'与第20组相同：第'+same.join('、第')+'组':'与第20组相同：'+(data.officialReady?'前19组无相同单数结果':'等待第20组'));
   }
   function renderGroups(groups, periodKey){
     var body=document.getElementById('groupTableBody');
@@ -279,6 +284,15 @@
     }
   }
   function render(data){
+    var rp=String(data.currentPeriod||'').padStart(4,'0');
+    if(lastRenderPeriod && rp && lastRenderPeriod!==rp){ lastGoodAI=null; lastGoodAIPeriod=''; }
+    if(rp) lastRenderPeriod=rp;
+    var status=document.getElementById('homeLiveStatus');
+    if(status){
+      if(data.stale){ status.textContent='数据连接恢复中 · 已保留最后有效结果'; status.className='home-live-status warn'; }
+      else if(data.officialReady){ status.textContent='本期正式结果已确认'; status.className='home-live-status ready'; }
+      else { status.textContent='实时采集中 · 等待本期正式开奖'; status.className='home-live-status'; }
+    }
     renderStats(data); renderGroups(data.groups||[],data.groupPeriodKey||data.currentPeriod||data.period||''); renderOmission(data); renderHistory(data);
     renderFixedResult(data);
   }
@@ -292,8 +306,11 @@
     drawRequestBusy=true;
     var url='/api/draw?t='+new Date().getTime();
     if(sendAILock) url+='&ai_lock_countdown=10';
-    var xhr=new XMLHttpRequest(); xhr.open('GET',url,true); xhr.setRequestHeader('Cache-Control','no-cache');
-    xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; drawRequestBusy=false; if(pendingAILock){setTimeout(function(){loadDraw(10);},0);} if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}}; xhr.onerror=function(){drawRequestBusy=false;}; xhr.ontimeout=function(){drawRequestBusy=false;};
+    var xhr=new XMLHttpRequest(); xhr.open('GET',url,true); xhr.setRequestHeader('Cache-Control','no-cache'); xhr.timeout=5000;
+    var finished=false;
+    function finishRequest(){ if(finished)return; finished=true; drawRequestBusy=false; if(pendingAILock){setTimeout(function(){loadDraw(10);},0);} }
+    xhr.onreadystatechange=function(){if(xhr.readyState!==4)return; finishRequest(); if(xhr.status<200||xhr.status>=300)return; try{var data=JSON.parse(xhr.responseText);if(data&&data.ok)render(data);}catch(e){}};
+    xhr.onerror=finishRequest; xhr.ontimeout=finishRequest; xhr.onabort=finishRequest;
     xhr.send(null);
   }
   var lastZeroMinute='';
@@ -322,7 +339,7 @@
     }
   }
   loadDraw();
-  window.setInterval(loadDraw,200); // fast in-memory result pickup
+  window.setInterval(loadDraw,350); // realtime pickup without flooding the backend
   tickCountdown(); window.setInterval(tickCountdown,200);
 })();
 </script>

@@ -1200,10 +1200,15 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
     display_top3=frozen_top3 if frozen_top3 else live_top3
     verified=int(agg['verified'] or 0) if agg else 0; hits=int(agg['ai_hits'] or 0) if agg else 0
     dv=int(agg['data_verified'] or 0) if agg else 0; dh=int(agg['data_hits'] or 0) if agg else 0
-    matches=[]
-    if official:
-        actual=int(official['singleCount'])
-        matches=[i for i in range(1,20) if str(i) in groups and int(groups[str(i)].get('singleCount',-1))==actual]
+    # Current-period values for the three historically highest-related positions.
+    # Strictly read from this period's already collected groups; never backfill from another period.
+    relation_top3=[]
+    for item in (relation.get('ranking') or [])[:3]:
+        x=dict(item)
+        gno=int(x.get('group') or 0)
+        grow=groups.get(str(gno)) if isinstance(groups, dict) else None
+        x['currentSingle'] = int(grow.get('singleCount')) if grow and grow.get('singleCount') is not None else None
+        relation_top3.append(x)
     top3_hits=int(agg.get('top3_hits') or 0) if agg else 0
     latest_result=None
     if latest_verified:
@@ -1221,7 +1226,7 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
             'top3Hits':top3_hits,'top3HitRate':round(top3_hits/verified*100,2) if verified else None,'latestVerified':latest_result,
             'hitRate':round(hits/verified*100,2) if verified else None,
             'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,
-            'sameAsGroup20':matches,'relationTop3':(relation.get('ranking') or [])[:3],'relationSample':relation.get('samplePeriods',0)}
+            'relationTop3':relation_top3,'relationSample':relation.get('samplePeriods',0)}
     with _ai_summary_cache_lock:
         _ai_summary_cache.update({'key':key,'at':time.time(),'value':dict(result)})
     return result
