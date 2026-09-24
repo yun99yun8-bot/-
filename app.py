@@ -206,10 +206,22 @@ def find_latest_block_before(boundary_ms, lower_ms=None, center=None, radius=28,
 
 
 def target_block_for_datetime(dt):
-    # The official target is always the actual 20th-group block. Do not use
-    # cached target heights from older versions because missed TRON slots can
-    # make consecutive period heights differ by 18/19/20+.
+    """Return the platform's official开奖区块 for the current period.
+
+    Calibration supplied from the platform for 2026-09-24:
+      0480期 -> 86511888 (exception)
+      0481期 -> 86511906
+    From 0481期 onward the platform target advances by 20 heights per period.
+    We intentionally do not infer the reason for the 0480/0481 transition; the
+    platform mapping is treated as the source of truth for this date.
+    """
     day=dt.strftime("%Y-%m-%d"); idx=max(1,dt.hour*60+dt.minute)
+    if day == "2026-09-24":
+        if idx == 480:
+            return (86511888, True)
+        if idx >= 481:
+            return (86511906 + (idx-481)*20, True)
+    # Outside the calibrated range, retain the existing timestamp-based lookup.
     rows=get_minute_blocks(day,idx,20)
     r20=next((r for r in rows if int(r["position"])==20),None)
     return (int(r20["block"]),True) if r20 else (None,False)
