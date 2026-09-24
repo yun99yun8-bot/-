@@ -357,12 +357,14 @@ def init_db():
                         target_block BIGINT NOT NULL,
                         data_conclusion SMALLINT,
                         ai_analysis SMALLINT NOT NULL,
+                        prediction_top3 JSONB,
                         sample_size SMALLINT NOT NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                         actual_single SMALLINT,
                         verified_at TIMESTAMPTZ
                     )
                 """)
+                cur.execute("ALTER TABLE ai_predictions ADD COLUMN IF NOT EXISTS prediction_top3 JSONB")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_predictions_date ON ai_predictions(period_date DESC, period_no DESC)")
         return True
     finally:
@@ -929,6 +931,7 @@ def save_prediction_if_ready(date_str, period, groups, target20):
     relation=group20_relation_model(date_str, period)
     ai, scores=ai_analysis_from_data(groups,historical,relation)
     if ai is None: return None
+    ranked_top3 = sorted(range(8), key=lambda i: (-float(scores.get(str(i), 0)), i))[:3]
     highest=stats.get('highest') or []
     # A tied data conclusion is not forced into a false single choice.
     data_conclusion=int(highest[0]['single']) if len(highest)==1 else None
@@ -939,10 +942,10 @@ def save_prediction_if_ready(date_str, period, groups, target20):
         with conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,sample_size)
-                    VALUES(%s,%s,%s,%s,%s,%s,18)
+                    INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,18)
                     ON CONFLICT(period_key) DO NOTHING
-                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai)))
+                """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3)))
     finally: db_release(conn)
     return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True}
 
@@ -965,16 +968,21 @@ def prediction_summary(date_str, period, groups, target20, official):
     key=f'{date_str}:{int(period):04d}'
     if official: verify_prediction(date_str,period,official)
     else: save_prediction_if_ready(date_str,period,groups,target20)
-    conn=db_connect(); row=None; agg=None
+    conn=db_connect(); row=None; agg=None; latest_verified=None
     if conn is not None:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT * FROM ai_predictions WHERE period_key=%s",(key,)); row=cur.fetchone()
                 cur.execute("""SELECT COUNT(*) FILTER (WHERE actual_single IS NOT NULL) verified,
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND ai_analysis=actual_single) ai_hits,
+                    COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND prediction_top3 @> to_jsonb(ARRAY[actual_single])) top3_hits,
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND data_conclusion IS NOT NULL) data_verified,
                     COUNT(*) FILTER (WHERE actual_single IS NOT NULL AND data_conclusion=actual_single) data_hits
                     FROM ai_predictions"""); agg=cur.fetchone()
+                cur.execute("""SELECT period_no, prediction_top3, actual_single FROM ai_predictions
+                    WHERE actual_single IS NOT NULL AND prediction_top3 IS NOT NULL
+                    ORDER BY verified_at DESC NULLS LAST, period_date DESC, period_no DESC LIMIT 1""")
+                latest_verified=cur.fetchone()
         finally: db_release(conn)
     historical=get_historical_official_singles(date_str,period)
     relation=group20_relation_model(date_str, period)
@@ -986,8 +994,20 @@ def prediction_summary(date_str, period, groups, target20, official):
     if official:
         actual=int(official['singleCount'])
         matches=[i for i in range(1,20) if str(i) in groups and int(groups[str(i)].get('singleCount',-1))==actual]
+    top3_hits=int(agg.get('top3_hits') or 0) if agg else 0
+    latest_result=None
+    if latest_verified:
+        pred=latest_verified.get('prediction_top3') or []
+        if isinstance(pred, str):
+            try: pred=json.loads(pred)
+            except Exception: pred=[]
+        pred=[int(x) for x in pred][:3]
+        actual=int(latest_verified['actual_single'])
+        hit_position=(pred.index(actual)+1) if actual in pred else None
+        latest_result={'period':int(latest_verified['period_no']), 'top3':pred, 'actual':actual, 'hit':bool(hit_position), 'hitPosition':hit_position}
     return {'single':ai_single,'scores':scores,'historicalSample':len(historical),
             'frozen':bool(row),'verifiedSample':verified,'hits':hits,
+            'top3Hits':top3_hits,'top3HitRate':round(top3_hits/verified*100,2) if verified else None,'latestVerified':latest_result,
             'hitRate':round(hits/verified*100,2) if verified else None,
             'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,
             'sameAsGroup20':matches,'relationTop3':(relation.get('ranking') or [])[:3],'relationSample':relation.get('samplePeriods',0)}

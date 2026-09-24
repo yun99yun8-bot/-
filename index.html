@@ -28,10 +28,13 @@
           <div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div>
         </div>
         <div class="conclusion" id="statsConclusion">结论：等待第1～18组数据</div>
-        <div class="conclusion ai-conclusion" id="aiConclusion">AI分析：等待数据</div>
-        <div class="stats-note" id="aiTop3">本期AI预测前三：等待数据</div>
-        <div class="stats-note" id="relationTop3">历史高关联组次：等待数据</div>
-        <div class="stats-note" id="aiAllScores">单0～单7评分：等待数据</div>
+        <div class="ai-panel">
+          <div class="ai-result-box" id="aiVerifyResult">预测验证：等待已开奖预测</div>
+          <div class="ai-lines">
+            <div class="ai-predict-line" id="aiTop3">本期AI预测前三：等待数据</div>
+            <div class="ai-relation-line" id="relationTop3">历史高关联组次：等待数据</div>
+          </div>
+        </div>
         <div class="stats-note" id="aiAccuracy">AI历史验证：暂无已验证样本</div>
         <div class="stats-note" id="group20Matches">与第20组相同：等待第20组</div>
       </section>
@@ -119,8 +122,6 @@
 
   function text(id,value){var el=document.getElementById(id);if(el)el.textContent=(value===null||value===undefined||value==='')?'--':String(value);}
   var currentCountdownValue=60;
-  var lockedAiDisplay=null;
-  var lockedAiPeriod='';
   function renderStats(data){
     var ds=data.dataStats||{}; var rows=Array.isArray(ds.stats)?ds.stats:[];
     for(var i=0;i<rows.length;i++){
@@ -132,36 +133,28 @@
     var sample=Number(ds.sampleSize||0), highest=Array.isArray(ds.highest)?ds.highest:[], names=[];
     for(var j=0;j<highest.length;j++)names.push('单'+highest[j].single);
     text('statsConclusion',highest.length?'结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）':'结论：等待第1～18组数据');
-    var ai=data.aiAnalysis||{};
-    var periodKey=String(data.groupPeriodKey||data.currentPeriod||'');
-    if(lockedAiPeriod!==periodKey){ lockedAiPeriod=periodKey; lockedAiDisplay=null; }
-    // Only expose one stable prediction window per period: countdown 10..1.
-    // At 10 seconds snapshot the current backend analysis; do not let it jump afterwards.
-    if(currentCountdownValue>=1 && currentCountdownValue<=10 && !lockedAiDisplay){
-      lockedAiDisplay=JSON.parse(JSON.stringify(ai||{}));
-    }
-    var shown=(currentCountdownValue>=1 && currentCountdownValue<=10 && lockedAiDisplay)?lockedAiDisplay:null;
-    if(shown){
-      var scoreMap=shown.scores||{}, ranked=[];
-      for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
-      ranked.sort(function(a,b){return b.score-a.score || a.single-b.single;});
-      var bestScore=(shown.single!=null && scoreMap[String(shown.single)]!=null)?Number(scoreMap[String(shown.single)]).toFixed(2):'--';
-      text('aiConclusion',shown.single!=null?'AI分析：单'+shown.single+'｜评分 '+bestScore+'%':'AI分析：正在分析中…');
-      var topParts=[]; for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
-      text('aiTop3',topParts.length?'本期AI预测前三：'+topParts.join('　'):'本期AI预测前三：正在分析中…');
-      var rel=Array.isArray(shown.relationTop3)?shown.relationTop3:[], relParts=[];
-      for(var ri=0;ri<rel.length;ri++) relParts.push('第'+rel[ri].group+'组 '+Number(rel[ri].matchRate||0).toFixed(2)+'%');
-      text('relationTop3',relParts.length?'历史高关联组次：'+relParts.join('　'):'历史高关联组次：等待数据');
-      var allParts=[]; for(var ax=0;ax<=7;ax++) allParts.push('单'+ax+' '+Number(scoreMap[String(ax)]||0).toFixed(1)+'%');
-      text('aiAllScores','单0～单7评分：'+allParts.join('｜'));
-    }else{
-      text('aiConclusion','AI分析：正在分析中…');
-      text('aiTop3','本期AI预测前三：正在分析中…');
-      text('relationTop3','历史高关联组次：正在分析中…');
-      text('aiAllScores','单0～单7评分：正在分析中…');
-    }
-    var rate=ai.hitRate!=null?Number(ai.hitRate).toFixed(2)+'%':'--';
-    text('aiAccuracy','AI历史验证：'+Number(ai.hits||0)+'/'+Number(ai.verifiedSample||0)+'（'+rate+'）');
+    var ai=data.aiAnalysis||{}, scoreMap=ai.scores||{}, ranked=[];
+    for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
+    ranked.sort(function(a,b){return b.score-a.score || a.single-b.single;});
+    var topParts=[];
+    for(var ti=0;ti<Math.min(3,ranked.length);ti++) topParts.push((ti+1)+'. 单'+ranked[ti].single+' '+ranked[ti].score.toFixed(2)+'%');
+    text('aiTop3',topParts.length?'本期AI预测前三：'+topParts.join('　'):'本期AI预测前三：正在分析中…');
+    var rel=Array.isArray(ai.relationTop3)?ai.relationTop3:[], relParts=[];
+    for(var ri=0;ri<rel.length;ri++) relParts.push('第'+rel[ri].group+'组 '+Number(rel[ri].matchRate||0).toFixed(2)+'%');
+    text('relationTop3',relParts.length?'历史高关联组次：'+relParts.join('　'):'历史高关联组次：等待数据');
+    var vr=ai.latestVerified;
+    if(vr && Array.isArray(vr.top3)){
+      var parts=[];
+      for(var vi=0;vi<vr.top3.length;vi++){
+        var sup=(Number(vr.hitPosition)===vi+1)?'<sup>'+(vi+1)+'</sup>':'';
+        parts.push('单'+vr.top3[vi]+sup);
+      }
+      var mark=vr.hit?'✓ 对':'✕ 错';
+      document.getElementById('aiVerifyResult').innerHTML='第'+String(vr.period).padStart(4,'0')+'期　'+parts.join(' / ')+'　实际：单'+vr.actual+'　<strong>'+mark+'</strong>';
+    }else{ text('aiVerifyResult','预测验证：等待已开奖预测'); }
+    var verified=Number(ai.verifiedSample||0), th=Number(ai.top3Hits||0);
+    var tr=ai.top3HitRate!=null?Number(ai.top3HitRate).toFixed(2)+'%':'--';
+    text('aiAccuracy','AI前三验证：'+th+'/'+verified+'（'+tr+'）');
     var same=Array.isArray(ai.sameAsGroup20)?ai.sameAsGroup20:[];
     text('group20Matches',same.length?'与第20组相同：第'+same.join('、第')+'组':'与第20组相同：'+(data.officialReady?'前19组无相同单数结果':'等待第20组'));
   }
@@ -258,7 +251,6 @@
     // Show 00 briefly at the exact Beijing minute boundary, then start 60..59..
     var value=(sec===0 && ms<650)?0:(sec===0?60:60-sec);
     currentCountdownValue=value;
-    if(value===0) lockedAiDisplay=null;
     text('countdown',value<10?'0'+value:value);
     var minuteKey=b.getFullYear()+'-'+(b.getMonth()+1)+'-'+b.getDate()+' '+b.getHours()+':'+b.getMinutes();
     if(value===0 && lastZeroMinute!==minuteKey){
