@@ -62,7 +62,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v8.1.5-event-g17-g20-barrier-dbfirst-1'
+MODEL_VERSION = 'v8.1.6-omission-independent-engine-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -574,6 +574,20 @@ def init_db():
                     )
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_service_heartbeats_updated ON service_heartbeats(updated_at DESC)")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS omission_runtime (
+                        singleton SMALLINT PRIMARY KEY DEFAULT 1 CHECK (singleton=1),
+                        omission JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        last_period_key TEXT,
+                        last_period_date DATE,
+                        last_period_no INTEGER,
+                        last_single SMALLINT,
+                        processed_count BIGINT NOT NULL DEFAULT 0,
+                        source TEXT NOT NULL DEFAULT 'period_groups group20',
+                        last_error TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
         return True
     finally:
         db_release(conn)
@@ -804,6 +818,117 @@ def restore_omission_from_db(date_str=None, period=None):
         write_state(state)
         _omission_bootstrapped = True
         return omission
+
+def get_omission_runtime():
+    """Read the durable omission snapshot shared by Worker and Web."""
+    conn=None
+    try:
+        conn=db_connect(retries=0)
+        if conn is None: return None
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT omission,last_period_key,last_period_date,last_period_no,last_single,processed_count,source,last_error,updated_at FROM omission_runtime WHERE singleton=1")
+            row=cur.fetchone()
+            if not row: return None
+            out=dict(row)
+            om=out.get('omission') or {}
+            if isinstance(om,str):
+                try: om=json.loads(om)
+                except Exception: om={}
+            out['omission']={str(i):int(om.get(str(i),0) or 0) for i in range(8)}
+            return out
+    finally:
+        if conn is not None: db_release(conn)
+
+
+def rebuild_omission_runtime():
+    """Rebuild omission from durable official group-20 rows only.
+
+    This is intentionally independent of /api/draw and process-local state files.
+    It is safe after deploy/restart and never uses AI predictions as official data.
+    """
+    conn=None
+    try:
+        conn=db_connect()
+        if conn is None: return False
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""SELECT period_key,period_date,period_no,single_count
+                               FROM period_groups WHERE group_no=20
+                               ORDER BY period_date ASC,period_no ASC""")
+                rows=cur.fetchall()
+                if not rows: return False
+                omission={str(i):0 for i in range(8)}
+                for r in rows:
+                    single=int(r['single_count'])
+                    if not 0 <= single <= 7: continue
+                    for i in range(8): omission[str(i)]=0 if i==single else omission[str(i)]+1
+                last=rows[-1]
+                cur.execute("""INSERT INTO omission_runtime(singleton,omission,last_period_key,last_period_date,last_period_no,last_single,processed_count,source,last_error,updated_at)
+                               VALUES(1,%s::jsonb,%s,%s,%s,%s,%s,'period_groups group20 rebuild',NULL,NOW())
+                               ON CONFLICT(singleton) DO UPDATE SET omission=EXCLUDED.omission,last_period_key=EXCLUDED.last_period_key,
+                               last_period_date=EXCLUDED.last_period_date,last_period_no=EXCLUDED.last_period_no,last_single=EXCLUDED.last_single,
+                               processed_count=EXCLUDED.processed_count,source=EXCLUDED.source,last_error=NULL,updated_at=NOW()""",
+                            (json.dumps(omission),last['period_key'],last['period_date'],int(last['period_no']),int(last['single_count']),len(rows)))
+        return True
+    except Exception as exc:
+        with _runtime_health_lock: _runtime_health['lastDbError']=str(exc)[:300]
+        return False
+    finally:
+        if conn is not None: db_release(conn)
+
+
+def omission_engine_worker():
+    """Independent durable omission heart.
+
+    Consumes confirmed period_groups.group_no=20 rows, catches up missed periods,
+    persists counters to PostgreSQL, and therefore keeps running with Web closed.
+    """
+    while True:
+        worker_touch('omission-engine')
+        conn=None
+        try:
+            snap=get_omission_runtime()
+            if not snap:
+                rebuild_omission_runtime()
+                time.sleep(0.5); continue
+            omission=dict(snap['omission'])
+            last_date=snap.get('last_period_date'); last_no=snap.get('last_period_no')
+            conn=db_connect(retries=0)
+            if conn is None:
+                time.sleep(0.5); continue
+            with conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    if last_date is None or last_no is None:
+                        cur.execute("SELECT period_key,period_date,period_no,single_count FROM period_groups WHERE group_no=20 ORDER BY period_date,period_no")
+                    else:
+                        cur.execute("""SELECT period_key,period_date,period_no,single_count FROM period_groups
+                                       WHERE group_no=20 AND (period_date>%s OR (period_date=%s AND period_no>%s))
+                                       ORDER BY period_date,period_no""",(last_date,last_date,int(last_no)))
+                    rows=cur.fetchall()
+                    processed=int(snap.get('processed_count') or 0)
+                    for r in rows:
+                        single=int(r['single_count'])
+                        if not 0 <= single <= 7: continue
+                        for i in range(8): omission[str(i)]=0 if i==single else omission[str(i)]+1
+                        processed += 1
+                        cur.execute("""UPDATE omission_runtime SET omission=%s::jsonb,last_period_key=%s,last_period_date=%s,last_period_no=%s,
+                                       last_single=%s,processed_count=%s,source='independent omission engine',last_error=NULL,updated_at=NOW() WHERE singleton=1""",
+                                    (json.dumps(omission),r['period_key'],r['period_date'],int(r['period_no']),single,processed))
+            if rows:
+                record_system_event('omission_catchup',rows[-1]['period_key'],{'processed':len(rows),'omission':omission})
+        except Exception as exc:
+            worker_touch('omission-engine',exc)
+            try:
+                c=db_connect(retries=0)
+                if c:
+                    with c:
+                        with c.cursor() as cur: cur.execute("UPDATE omission_runtime SET last_error=%s,updated_at=NOW() WHERE singleton=1",(str(exc)[:300],))
+                    db_release(c)
+            except Exception: pass
+        finally:
+            if conn is not None: db_release(conn)
+        time.sleep(0.5)
+
 
 def tron_ingest_worker():
     """Low-latency TRON collector. PostgreSQL never blocks live publication."""
@@ -1171,6 +1296,7 @@ def start_worker_once():
         _start_managed_worker('ai-prediction',ai_prediction_worker)
         _start_managed_worker('smart-db',smart_db_worker)
         _start_managed_worker('period-engine',autonomous_period_worker)
+        _start_managed_worker('omission-engine',omission_engine_worker)
         _start_managed_worker('supervisor',supervisor_worker)
 
 
@@ -2063,8 +2189,18 @@ def draw():
         result_obj = official
         if result_obj is None and isinstance(state.get('numbers'), list) and len(state.get('numbers')) == 7:
             result_obj = {'numbers': state['numbers'], 'singleCount': state.get('singleCount'), 'blockNumber': state.get('blockNumber'), 'block': state.get('block'), 'platformPeriod': state.get('platformPeriod')}
-        omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
-        omission = {str(i): int(omission.get(str(i), 0) or 0) for i in range(8)}
+        durable_omission = None
+        try: durable_omission = get_omission_runtime()
+        except Exception: durable_omission = None
+        if durable_omission and isinstance(durable_omission.get('omission'),dict):
+            omission = durable_omission['omission']
+            state['omission'] = omission
+            state['lastOmissionPeriod'] = durable_omission.get('last_period_key')
+            state['omissionSource'] = durable_omission.get('source') or 'independent omission engine'
+            state['omissionHistorySample'] = int(durable_omission.get('processed_count') or 0)
+        else:
+            omission = state.get('omission') if isinstance(state.get('omission'), dict) else {}
+            omission = {str(i): int(omission.get(str(i), 0) or 0) for i in range(8)}
         history = build_recent_official_history(date_str, period, 20)
         ui_countdown = request.args.get('ai_lock_countdown', type=int)
         ai_info = prediction_summary(date_str, period, groups, target20, official, ui_countdown)
@@ -2177,7 +2313,7 @@ def result_fast():
 @app.get('/api/system-health')
 def system_health():
     ds,p,ps,platform=current_period()
-    conn=None; counts={'periodGroups':0,'predictions':0,'events':0,'runtimePeriods':0}
+    conn=None; counts={'periodGroups':0,'predictions':0,'events':0,'runtimePeriods':0,'omissionProcessed':0}
     try:
         conn=db_connect()
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -2185,6 +2321,7 @@ def system_health():
             cur.execute("SELECT COUNT(*) AS n FROM ai_predictions"); counts['predictions']=int(cur.fetchone()['n'])
             cur.execute("SELECT COUNT(*) AS n FROM system_events"); counts['events']=int(cur.fetchone()['n'])
             cur.execute("SELECT COUNT(*) AS n FROM period_runtime"); counts['runtimePeriods']=int(cur.fetchone()['n'])
+            cur.execute("SELECT processed_count FROM omission_runtime WHERE singleton=1"); _or=cur.fetchone(); counts['omissionProcessed']=int(_or['processed_count']) if _or else 0
             cur.execute("SELECT state,groups_seen,updated_at,last_error,prediction_locked_at,result_ready_at,verified_at,g17_ready_at,lock_attempts,lifecycle_trace FROM period_runtime WHERE period_key=%s",(f'{ds}:{int(p):04d}',))
             pr=cur.fetchone()
             cur.execute("SELECT service_name,service_role,instance_id,model_version,current_period,current_period_key,status,detail,started_at,updated_at FROM service_heartbeats ORDER BY updated_at DESC")
@@ -2208,6 +2345,14 @@ def system_health():
                 'healthy':age < 20.0,'detail':detail
             }
         runtime=dict(_runtime_health)
+        try:
+            _os=get_omission_runtime()
+            if _os:
+                _stamp=_os.get('updated_at')
+                runtime['omissionEngine']={'omission':_os.get('omission'),'lastPeriodKey':_os.get('last_period_key'),
+                    'processedCount':_os.get('processed_count'),'lastSingle':_os.get('last_single'),'source':_os.get('source'),
+                    'lastError':_os.get('last_error'),'updatedAt':_stamp.isoformat() if hasattr(_stamp,'isoformat') else str(_stamp)}
+        except Exception as _oe: runtime['omissionEngine']={'lastError':str(_oe)[:200]}
         runtime['services']=service_status
         runtime['workerOnline']=any(v.get('role')=='worker' and v.get('healthy') for v in service_status.values())
         runtime['currentPeriodState']=dict(pr) if pr else None

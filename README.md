@@ -1,3 +1,7 @@
+# V8.1.6 — Independent Omission Engine
+
+Based on V8.1.5. Keeps the stable G17/G20 prediction lifecycle unchanged and adds a PostgreSQL-backed omission engine that runs in the Background Worker, catches up missed official group-20 periods after restart, and exposes its heartbeat/state in `/api/system-health`.
+
 # V8.1.5 — Event-driven G17 + G20 Barrier + DB-first Repair
 
 This build keeps the V8.1.4 throttling and lifecycle tracing, and adds:
