@@ -206,3 +206,10 @@ AI statistical analysis module:
 推荐迁移顺序：先部署代码到 Web（后台线程关闭），随后立即创建 Background Worker 并设置相同的 Internal `DATABASE_URL`。迁移窗口内可能短暂停止后台采集，因此最好连续完成两步。
 
 `render.yaml` 已包含 web/worker 蓝图示例，但已有 Render 服务可直接手工修改 Start Command，不必重建数据库。
+
+
+## V8.1.1
+- PostgreSQL cross-process worker heartbeat (`service_heartbeats`).
+- Fixed `/api/system-health` RealDictCursor/ValueError path.
+- Worker prints a 30-second heartbeat to Render Logs.
+- Web remains read/API only unless RUN_EMBEDDED_WORKERS=1 is explicitly set.

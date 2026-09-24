@@ -61,7 +61,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v8.1-production-1'
+MODEL_VERSION = 'v8.1.1-production-2'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -445,9 +445,63 @@ def init_db():
                     )
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_period_runtime_updated ON period_runtime(updated_at DESC)")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS service_heartbeats (
+                        service_name TEXT PRIMARY KEY,
+                        service_role TEXT NOT NULL,
+                        instance_id TEXT,
+                        model_version TEXT,
+                        current_period TEXT,
+                        current_period_key TEXT,
+                        status TEXT NOT NULL DEFAULT 'ONLINE',
+                        detail JSONB,
+                        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_service_heartbeats_updated ON service_heartbeats(updated_at DESC)")
         return True
     finally:
         db_release(conn)
+
+
+def persist_service_heartbeat(service_name='tron-monitor-worker', service_role='worker', instance_id=None, status='ONLINE', detail=None):
+    """Persist cross-process service health so Web can observe the Background Worker."""
+    ds,p,ps,_=current_period()
+    conn=None
+    try:
+        conn=db_connect()
+        if conn is None: return False
+        payload=detail if isinstance(detail,dict) else {}
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO service_heartbeats(service_name,service_role,instance_id,model_version,current_period,current_period_key,status,detail,started_at,updated_at)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,NOW(),NOW())
+                    ON CONFLICT(service_name) DO UPDATE SET
+                      service_role=EXCLUDED.service_role, instance_id=EXCLUDED.instance_id,
+                      model_version=EXCLUDED.model_version, current_period=EXCLUDED.current_period,
+                      current_period_key=EXCLUDED.current_period_key, status=EXCLUDED.status,
+                      detail=EXCLUDED.detail, updated_at=NOW()
+                """,(service_name,service_role,instance_id,MODEL_VERSION,ps,f'{ds}:{int(p):04d}',status,json.dumps(payload,ensure_ascii=False)))
+        return True
+    except Exception as exc:
+        with _runtime_health_lock: _runtime_health['lastDbError']=str(exc)[:300]
+        return False
+    finally:
+        if conn is not None: db_release(conn)
+
+
+def get_service_heartbeats():
+    conn=None
+    try:
+        conn=db_connect()
+        if conn is None: return []
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT service_name,service_role,instance_id,model_version,current_period,current_period_key,status,detail,started_at,updated_at FROM service_heartbeats ORDER BY updated_at DESC")
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        if conn is not None: db_release(conn)
 
 
 def publish_block_live(block):
@@ -1901,28 +1955,41 @@ def system_health():
     conn=None; counts={'periodGroups':0,'predictions':0,'events':0,'runtimePeriods':0}
     try:
         conn=db_connect()
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM period_groups"); counts['periodGroups']=int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM ai_predictions"); counts['predictions']=int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM system_events"); counts['events']=int(cur.fetchone()[0])
-            cur.execute("SELECT COUNT(*) FROM period_runtime"); counts['runtimePeriods']=int(cur.fetchone()[0])
-            cur.execute("SELECT state,groups_seen,updated_at,last_error FROM period_runtime WHERE period_key=%s",(f'{ds}:{int(p):04d}',))
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM period_groups"); counts['periodGroups']=int(cur.fetchone()['n'])
+            cur.execute("SELECT COUNT(*) AS n FROM ai_predictions"); counts['predictions']=int(cur.fetchone()['n'])
+            cur.execute("SELECT COUNT(*) AS n FROM system_events"); counts['events']=int(cur.fetchone()['n'])
+            cur.execute("SELECT COUNT(*) AS n FROM period_runtime"); counts['runtimePeriods']=int(cur.fetchone()['n'])
+            cur.execute("SELECT state,groups_seen,updated_at,last_error,prediction_locked_at,result_ready_at,verified_at FROM period_runtime WHERE period_key=%s",(f'{ds}:{int(p):04d}',))
             pr=cur.fetchone()
+            cur.execute("SELECT service_name,service_role,instance_id,model_version,current_period,current_period_key,status,detail,started_at,updated_at FROM service_heartbeats ORDER BY updated_at DESC")
+            services=[dict(r) for r in cur.fetchall()]
+        now=datetime.now(timezone.utc)
+        service_status={}
+        for row in services:
+            stamp=row.get('updated_at')
+            age=999999.0
+            if stamp is not None:
+                try:
+                    if stamp.tzinfo is None: stamp=stamp.replace(tzinfo=timezone.utc)
+                    age=max(0.0,(now-stamp.astimezone(timezone.utc)).total_seconds())
+                except Exception: pass
+            detail=row.get('detail') or {}
+            service_status[row['service_name']]={
+                'role':row.get('service_role'),'instanceId':row.get('instance_id'),
+                'modelVersion':row.get('model_version'),'currentPeriod':row.get('current_period'),
+                'currentPeriodKey':row.get('current_period_key'),'status':row.get('status'),
+                'lastHeartbeat':stamp.isoformat() if stamp else None,'ageSeconds':round(age,1),
+                'healthy':age < 20.0,'detail':detail
+            }
         runtime=dict(_runtime_health)
-        hb=dict(runtime.get('workerHeartbeats') or {})
-        now=datetime.now(CN_TZ); worker_status={}
-        for name,stamp in hb.items():
-            try:
-                age=max(0.0,(now-datetime.fromisoformat(stamp)).total_seconds())
-            except Exception: age=999999
-            worker_status[name]={'lastHeartbeat':stamp,'ageSeconds':round(age,1),'healthy':age < 12}
-        runtime['workers']=worker_status
-        runtime['workerRestarts']=dict(_worker_restarts)
+        runtime['services']=service_status
+        runtime['workerOnline']=any(v.get('role')=='worker' and v.get('healthy') for v in service_status.values())
         runtime['currentPeriodState']=dict(pr) if pr else None
-        return jsonify({'ok':True,'period':ps,'platformPeriod':platform,'modelVersion':MODEL_VERSION,
-                        'counts':counts,'runtime':runtime})
+        runtime['workerRestarts']=dict(_worker_restarts)
+        return jsonify({'ok':True,'period':ps,'platformPeriod':platform,'modelVersion':MODEL_VERSION,'counts':counts,'runtime':runtime})
     except Exception as exc:
-        return jsonify({'ok':False,'error':type(exc).__name__,'runtime':dict(_runtime_health)}),503
+        return jsonify({'ok':False,'error':type(exc).__name__,'message':str(exc)[:200],'runtime':dict(_runtime_health)}),503
     finally:
         if conn is not None: db_release(conn)
 
