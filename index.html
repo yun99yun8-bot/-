@@ -32,7 +32,7 @@
       <section class="card hero-card">
         <div class="result-head">
           <div class="section-title">开奖结果</div>
-          <div class="period-badge">第 <strong id="periodValue">0000</strong> 期</div>
+          <div class="period-badge">第 <strong id="periodValue">0000</strong> 期<br><small>区块：<span id="blockValue">--</span></small></div>
         </div>
         <div class="result-grid" aria-label="七个开奖结果">
           <div class="result-box" data-result="0">--</div>
@@ -102,7 +102,8 @@
       const data=await res.json();
       if(!data.ok) throw new Error(data.error||'开奖数据获取失败');
       document.getElementById('periodValue').textContent=data.period;
-      document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=data.numbers[i]||'--';});
+      document.querySelectorAll('[data-result]').forEach((el,i)=>{el.textContent=(data.numbers&&data.numbers[i])||'--';});
+      document.getElementById('blockValue').textContent=data.blockNumber??'--';
     }catch(err){
       console.error(err);
     }

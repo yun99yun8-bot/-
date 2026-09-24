@@ -23,7 +23,7 @@ def fetch_latest_block():
     req = Request(TRON_NOWBLOCK, headers={'User-Agent': 'TornMonitor/1.0'})
     with urlopen(req, timeout=8) as resp:
         data = json.loads(resp.read().decode('utf-8'))
-    block_id = data.get('blockID') or data.get('block_header', {}).get('raw_data', {}).get('number')
+    block_id = data.get('blockID')
     number = data.get('block_header', {}).get('raw_data', {}).get('number')
     timestamp = data.get('block_header', {}).get('raw_data', {}).get('timestamp')
     if not block_id or not isinstance(block_id, str):
