@@ -123,8 +123,13 @@
 
   function text(id,value){var el=document.getElementById(id);if(el)el.textContent=(value===null||value===undefined||value==='')?'--':String(value);}
   var currentCountdownValue=60;
+  // UI last-good cache: transient empty API fields must never blank valid analysis.
+  var lastGoodAI=null;
+  var lastGoodStats=null;
   function renderStats(data){
-    var ds=data.dataStats||{}; var rows=Array.isArray(ds.stats)?ds.stats:[];
+    var incomingStats=data.dataStats||{};
+    if(Array.isArray(incomingStats.stats) && incomingStats.stats.length){ lastGoodStats=incomingStats; }
+    var ds=(Array.isArray(incomingStats.stats)&&incomingStats.stats.length)?incomingStats:(lastGoodStats||incomingStats); var rows=Array.isArray(ds.stats)?ds.stats:[];
     for(var i=0;i<rows.length;i++){
       var row=rows[i], el=document.querySelector('[data-prob-single="'+row.single+'"]');
       if(!el)continue; var sm=el.querySelectorAll('small');
@@ -133,8 +138,13 @@
     }
     var sample=Number(ds.sampleSize||0), highest=Array.isArray(ds.highest)?ds.highest:[], names=[];
     for(var j=0;j<highest.length;j++)names.push('单'+highest[j].single);
-    text('statsConclusion',highest.length?'数据结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）':'数据结论：等待第1～18组数据');
-    var ai=data.aiAnalysis||{}, scoreMap=ai.scores||{}, ranked=[];
+    if(highest.length){ text('statsConclusion','数据结论：'+names.join('、')+' 最高（'+highest[0].count+'次 / '+sample+'组）'); }
+    else if(!lastGoodStats){ text('statsConclusion','数据结论：等待第1～18组数据'); }
+    var incomingAI=data.aiAnalysis||{};
+    var incomingScores=incomingAI.scores||{};
+    var incomingValid=(incomingAI.single===0||!!incomingAI.single||Object.keys(incomingScores).length>0||Array.isArray(incomingAI.top3)&&incomingAI.top3.length>0);
+    if(incomingValid){ lastGoodAI=incomingAI; }
+    var ai=incomingValid?incomingAI:(lastGoodAI||incomingAI), scoreMap=ai.scores||{}, ranked=[];
     var aiSingle=(ai.single===0||ai.single)?ai.single:null;
     var aiSample=Number(ai.historicalSample||0);
     text('aiAnalysisLine', aiSingle!==null ? ('AI分析：单'+aiSingle+'　｜　历史样本：'+aiSample+'期'+(ai.frozen?'　｜　本期已锁定':'　｜　实时分析')) : 'AI分析：正在分析中…');
@@ -170,19 +180,15 @@
       var g=groups[i], n=Number(g.group);
       if(n>=1 && n<=20) map[n]=g;
     }
-    var count=Object.keys(map).length;
-    // 20组不再逐组动态点亮：本期20组齐全后一次性完整显示。
-    if(count<20){
-      body.innerHTML='<tr><td colspan="4">等待本期20组数据（'+count+'/20）</td></tr>';
-      return;
-    }
+    // Fixed 1-20 framework: never hide the table because one or more groups are late.
+    // Available rows are filled immediately; unavailable rows remain as waiting placeholders.
     var html='';
     for(var n=1;n<=20;n++){
       var g=map[n];
-      var block=g&&g.blockNumber!=null?g.blockNumber:'--';
+      var block=g&&g.blockNumber!=null?g.blockNumber:'等待数据';
       var single=g&&g.singleCount!=null?'单'+g.singleCount:'--';
       var nums=g&&Array.isArray(g.numbers)&&g.numbers.length?g.numbers.join(' '):'--';
-      html+='<tr><td>第'+n+'组</td><td>'+block+'</td><td>'+single+'</td><td>'+nums+'</td></tr>';
+      html+='<tr class="'+(g?'':'waiting-row')+'"><td>第'+n+'组</td><td>'+block+'</td><td>'+single+'</td><td>'+nums+'</td></tr>';
     }
     body.innerHTML=html;
   }

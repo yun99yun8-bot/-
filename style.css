@@ -98,3 +98,6 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .ai-predict-line{background:#fff0f5;color:#8f214d;border:1px solid #f3d4df}
 .ai-relation-line{background:#f3f7ff;color:#3f5f91;border:1px solid #dce6f6}
 @media(max-width:360px){.ai-panel{grid-template-columns:1fr 1.15fr;gap:5px}.ai-result-box,.ai-predict-line,.ai-relation-line{font-size:10px;padding:7px 5px}}
+
+/* Fixed 20-group placeholders: keep the complete frame visible while data arrives. */
+#groupTableBody tr.waiting-row td { opacity: .58; }
