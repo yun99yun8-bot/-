@@ -941,7 +941,20 @@ def ai_analysis_from_data(groups, historical, relation=None):
     pick = ranked[0]
     return pick, {str(i): round(scores[i], 2) for i in range(8)}
 
+def calibrated_countdown_value():
+    """Countdown on the same Beijing-4s clock used by current_period/UI."""
+    now = datetime.now(CN_TZ) - timedelta(seconds=4)
+    sec = now.second
+    # Backend does not need the UI's brief 00 animation; second 0 is the new period.
+    return 60 if sec == 0 else 60 - sec
+
+
 def save_prediction_if_ready(date_str, period, groups, target20):
+    # The official AI decision is made exactly once in the final 10 seconds.
+    # Before that we may calculate live signals internally, but they are not persisted as the prediction.
+    countdown = calibrated_countdown_value()
+    if countdown < 1 or countdown > 10:
+        return None
     stats=stats_from_groups(groups)
     if stats.get('sampleSize') != 18 or groups.get('20'):
         return None
@@ -965,7 +978,7 @@ def save_prediction_if_ready(date_str, period, groups, target20):
                     ON CONFLICT(period_key) DO NOTHING
                 """,(key,date_str,int(period),int(target20),data_conclusion,int(ai),json.dumps(ranked_top3)))
     finally: db_release(conn)
-    return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True}
+    return {'single':ai,'scores':scores,'historicalSample':len(historical),'frozen':True,'period':int(period),'lockCountdown':countdown}
 
 
 def verify_prediction(date_str, period, official):
@@ -1039,7 +1052,8 @@ def prediction_summary(date_str, period, groups, target20, official):
         hit_position=(pred.index(actual)+1) if actual in pred else None
         latest_result={'period':int(latest_verified['period_no']), 'top3':pred, 'actual':actual, 'hit':bool(hit_position), 'hitPosition':hit_position}
     result={'single':ai_single,'scores':scores,'historicalSample':len(historical),
-            'frozen':bool(row),'top3':display_top3,'verifiedSample':verified,'hits':hits,
+            'frozen':bool(row),'period':int(row['period_no']) if row else int(period),
+            'top3':display_top3,'verifiedSample':verified,'hits':hits,
             'top3Hits':top3_hits,'top3HitRate':round(top3_hits/verified*100,2) if verified else None,'latestVerified':latest_result,
             'hitRate':round(hits/verified*100,2) if verified else None,
             'dataVerifiedSample':dv,'dataHits':dh,'dataHitRate':round(dh/dv*100,2) if dv else None,

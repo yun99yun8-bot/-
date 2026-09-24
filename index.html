@@ -165,8 +165,11 @@
     if(incomingValid){ lastGoodAI=incomingAI; }
     var ai=incomingValid?incomingAI:(lastGoodAI||incomingAI), scoreMap=ai.scores||{}, ranked=[];
     var aiSingle=(ai.single===0||ai.single)?ai.single:null;
-    var aiSample=Number(ai.historicalSample||0);
-    text('aiAnalysisLine', aiSingle!==null ? ('AI分析：单'+aiSingle+'　｜　历史样本：'+aiSample+'期'+(ai.frozen?'　｜　本期已锁定':'　｜　实时分析')) : 'AI分析：正在分析中…');
+    var aiPeriod=Number(ai.period||data.currentPeriod||data.period||0);
+    // Only expose the official AI analysis during the final 10..1 seconds.
+    // At 00 and during 60..11 it returns to analysing; the locked DB record is retained for verification.
+    var showLockedAI=(currentCountdownValue>=1 && currentCountdownValue<=10 && ai.frozen && aiSingle!==null);
+    text('aiAnalysisLine', showLockedAI ? ('AI分析：单'+aiSingle+'　｜　第'+String(aiPeriod).padStart(4,'0')+'期　｜　已锁定') : 'AI分析：正在分析中…');
     for(var sx=0;sx<=7;sx++) ranked.push({single:sx,score:Number(scoreMap[String(sx)]||0)});
     ranked.sort(function(a,b){return b.score-a.score || a.single-b.single;});
     var lockedTop=Array.isArray(ai.top3)?ai.top3:[];
