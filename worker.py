@@ -1,66 +1,51 @@
-"""V9.0 Research AI Background Worker.
-All autonomous engine work lives here; Web remains read/API only.
-Cross-process health is persisted to PostgreSQL.
-"""
+"""Collection, official history, omission and practice. No old AI engines."""
 import os
 import signal
 import socket
+import threading
 import time
-import app as core
 
-_stop = False
-_started = time.time()
-INSTANCE_ID = os.environ.get('RENDER_INSTANCE_ID') or os.environ.get('HOSTNAME') or socket.gethostname()
-SERVICE_NAME = os.environ.get('WORKER_SERVICE_NAME', 'tron-monitor-worker')
+import collector_core as core
+import research_engine
 
-def _stop_handler(*_):
-    global _stop
-    _stop = True
+if not core.DATABASE_URL:raise SystemExit('DATABASE_URL is required')
+if not core.init_db():raise SystemExit('Database initialization failed')
 
-signal.signal(signal.SIGTERM, _stop_handler)
-signal.signal(signal.SIGINT, _stop_handler)
+targets={
+    'result-db-writer':core.result_db_writer_worker,
+    'db-writer':core.db_writer_worker,
+    'tron-ingest':core.tron_ingest_worker,
+    'target-result-fast':core.target_result_fast_worker,
+    'smart-db':core.smart_db_worker,
+    'omission-engine':core.omission_engine_worker,
+    'practice':research_engine.practice_worker,
+    'trial':research_engine.live_trial_worker,
+    'trial-verify':research_engine.verify_worker,
+}
+threads={}
+stopping=False
 
-if not core.DATABASE_URL:
-    raise SystemExit('DATABASE_URL is required')
+def stop(*_):
+    global stopping
+    stopping=True
 
-core.init_db()
-core.start_worker_once()
-core.record_system_event('worker_service_started', None, {'modelVersion': core.MODEL_VERSION, 'instanceId': INSTANCE_ID})
-print(f'[V9.0] worker started instance={INSTANCE_ID} model={core.MODEL_VERSION}', flush=True)
+signal.signal(signal.SIGTERM,stop)
+signal.signal(signal.SIGINT,stop)
+name=os.environ.get('WORKER_SERVICE_NAME','tron-monitor-worker')
+instance=os.environ.get('RENDER_INSTANCE_ID') or socket.gethostname()
 
-last_log = 0.0
-while not _stop:
-    now=time.time()
+while not stopping:
+    for label,target in targets.items():
+        thread=threads.get(label)
+        if thread is None or not thread.is_alive():
+            thread=threading.Thread(target=target,name=label,daemon=True)
+            threads[label]=thread
+            thread.start()
     with core._runtime_health_lock:
-        local_hb=dict(core._runtime_health.get('workerHeartbeats') or {})
-        local_err=dict(core._runtime_health.get('workerErrors') or {})
-        last_ai=core._runtime_health.get('lastAiError')
-        last_db=core._runtime_health.get('lastDbError')
-    with core._fast_diag_lock:
-        fast_target=dict(core._fast_diag)
-    detail={
-        'uptimeSeconds': int(now-_started),
-        'engineHeartbeats': local_hb,
-        'engineErrors': local_err,
-        'lastAiError': last_ai,
-        'lastDbError': last_db,
-        'fastTarget': fast_target,
-        'resultWriterBacklog': core._result_db_write_queue.qsize(),
-        'workerRestarts': dict(core._worker_restarts),
-    }
-    ok=core.persist_service_heartbeat(SERVICE_NAME,'worker',INSTANCE_ID,'ONLINE',detail)
-    if now-last_log >= 30:
-        ds,p,ps,_=core.current_period()
-        alive=[]
-        with core._worker_threads_lock:
-            alive=[name for name,th in core._worker_threads.items() if th and th.is_alive()]
-        print(f'[V9.0] heartbeat period={ps} db={"ok" if ok else "error"} engines={len(alive)} {alive}', flush=True)
-        last_log=now
+        errs=dict(core._runtime_health.get('workerErrors') or {})
+        status=dict(core._runtime_health.get('workerHeartbeats') or {})
+    core.persist_service_heartbeat(name,'worker',instance,'ONLINE',{
+        'runningEngines':[key for key,thread in threads.items() if thread.is_alive()],
+        'engineErrors':errs,'engineHeartbeats':status,
+        'resultWriterBacklog':core._result_db_write_queue.qsize()})
     time.sleep(5)
-
-try:
-    core.persist_service_heartbeat(SERVICE_NAME,'worker',INSTANCE_ID,'STOPPING',{'uptimeSeconds':int(time.time()-_started)})
-    core.record_system_event('worker_service_stopping', None, {'modelVersion': core.MODEL_VERSION, 'instanceId': INSTANCE_ID})
-except Exception:
-    pass
-print('[V9.0] worker stopping', flush=True)

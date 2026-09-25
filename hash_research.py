@@ -97,6 +97,62 @@ def build_examples(rows):
     return examples
 
 
+def research_forecasts(snapshot,groups=None,historical=None):
+    """Frozen candidate rankings from a model trained through prior periods."""
+    if not snapshot or not isinstance(snapshot.get('researchModels'),dict):return {}
+    context=features(groups,historical) if groups else _history_features(historical)
+    result={}
+    for family,model in snapshot['researchModels'].items():
+        if family!='history_only' and not groups:continue
+        info=(snapshot.get('featureFamilies') or {}).get(family) or {}
+        alpha=float((snapshot.get('replayAlpha') or {}).get(family,info.get('tunedAlpha') or 0))
+        probabilities=_blended(model,context,alpha)
+        result[family]={'single':max(range(8),key=lambda i:(probabilities[i],-i)),
+                        'scores':probabilities}
+    return result
+
+
+def replay_first_1000_next_1500(examples):
+    """Train on the oldest 1000 of the last 2500; replay each later period.
+
+The replay may use earlier replay labels as history features because they
+would have been available before that period; model weights never see them.
+"""
+    ordered=sorted(examples,key=lambda item:item[0])[-2500:]
+    if len(ordered)<1000:
+        return {'status':'waiting_for_1000','available':len(ordered),
+                'trainingPeriods':len(ordered),'replayPeriods':0,'ranking':[],
+                'topTwo':[],'alphas':{}}
+    training=ordered[:1000];later=ordered[1000:]
+    fit_part=training[:700];tune_part=training[700:]
+    methods={};alphas={}
+    for name,feature_names in FEATURE_FAMILIES.items():
+        tune_model=fit(fit_part,feature_names)
+        alpha=min((.15,.30,.50,.75,1.0),
+                  key=lambda a:(_evaluation(tune_model,a,tune_part)['loss'],a))
+        methods[name]=fit(training,feature_names);alphas[name]=alpha
+    hits={name:0 for name in (*FEATURE_FAMILIES,'fixed_3','fixed_4')}
+    for _,x,label in later:
+        hits['fixed_3']+=int(label==3);hits['fixed_4']+=int(label==4)
+        for name,model in methods.items():
+            scores=_blended(model,x,alphas[name])
+            pick=max(range(8),key=lambda i:(scores[i],-i))
+            hits[name]+=int(pick==label)
+    tested=len(later)
+    ranking=[{'method':name,'hits':count,'tested':tested,
+              'top1Rate':round(100*count/tested,2) if tested else None,
+              'alpha':alphas.get(name)} for name,count in hits.items()]
+    ranking.sort(key=lambda r:(-r['hits'],r['method']))
+    return {'status':'replaying' if tested<200 else 'provisional_ranked',
+            'available':len(ordered),'trainingPeriods':len(training),
+            'replayPeriods':tested,'trainingFrom':training[0][0],
+            'trainingThrough':training[-1][0],
+            'replayFrom':later[0][0] if later else None,
+            'replayThrough':later[-1][0] if later else None,
+            'ranking':ranking,'topTwo':[r['method'] for r in ranking[:2]] if tested>=200 else [],
+            'alphas':alphas}
+
+
 def fit(examples, feature_names=FEATURE_NAMES):
     labels=[0]*8; counts={n:[defaultdict(int) for _ in range(8)] for n in feature_names}
     vocabulary={n:set() for n in feature_names}
@@ -190,6 +246,7 @@ def train_snapshot(examples):
             'holdoutHalves':halves,'baselineLoss':baseline_loss,'modelLoss':selected_loss,
             'baselineTop1':baseline_hits,'modelTop1':selected_hits,'active':active,
             'model':fit(examples,FEATURE_FAMILIES[selected_family]) if active else None,
+            'researchModels':{name:fit(examples,names) for name,names in FEATURE_FAMILIES.items()},
             'historyModel':fit(examples,FEATURE_FAMILIES['history_only']),
             'historyAlpha':reports['history_only']['tunedAlpha']}
 

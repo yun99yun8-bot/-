@@ -4,7 +4,7 @@ from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 import unittest
 
-source=ast.parse(Path(__file__).with_name('app.py').read_text())
+source=ast.parse(Path(__file__).with_name('collector_core.py').read_text())
 names={'period_index','period_target_block','tail_schedule','_tail_boundary',
        'calibrated_group20_row','historical_prediction_verified'}
 constants={'TAIL_ANCHOR_INDEX','TAIL_INTERVAL_PERIODS','TAIL_SEQUENCE'}
