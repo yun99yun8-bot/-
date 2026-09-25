@@ -1,8 +1,5 @@
-# V10.6.2 RENDER WEB FIX
+# V10.6.3 HISTORY ONLY — 20万原始区块优先
 
-- Fixes Render Web Service when its existing Start Command is `python app.py`.
-- `app.py` now keeps the HTTP server alive and listens on Render `$PORT` at `0.0.0.0`.
-- `worker.py` remains responsible for live raw capture + 200,000 historical raw blocks.
-- Historical 360-rule rebuild stays blocked until the frozen 200,000-block archive is complete.
-- Keeps V10.6 one-time dataset reset marker; redeploying this patch does not intentionally reset the same V10.6 dataset again.
-- `render.yaml` still recommends Gunicorn for Blueprint/new services, but this patch is compatible with the existing `python app.py` Web Service setting.
+流程锁死：首次部署本数据集自动清除旧业务数据 → 锁定20万历史TRON区块范围 → 第一阶段只保存 block_number / hash / timestamp，不抓新数据、不计算号码、不做遗漏 → 20万完整验证后才按360规则本地回填10000期 → 全部完成后再另做“补齐最新开奖记录”版本。
+
+Render：Web `gunicorn app:app ...`；Worker `python worker.py`。普通重启不会再次清库，同一 DATASET_ID 只重置一次。

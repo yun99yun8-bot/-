@@ -11,6 +11,7 @@ import time
 import collector_core as core
 
 TARGET_PERIODS=10000
+RAW_TARGET=TARGET_PERIODS*20
 RANGE_CHUNK=100
 _live_priority_until=0.0
 
@@ -73,15 +74,14 @@ def _live_has_priority():
 
 
 def _normalize(raw):
+    """Stage-1 validation only. Do NOT calculate lottery numbers while downloading raw history."""
     header=(raw.get('block_header') or {}).get('raw_data') or {}
-    number=header.get('number');h=raw.get('blockID');timestamp=header.get('timestamp')
+    number=header.get('number'); h=raw.get('blockID'); timestamp=header.get('timestamp')
     if number is None or not isinstance(h,str) or len(h)!=64 or not all(c in '0123456789abcdefABCDEF' for c in h):
         raise ValueError('invalid chain block number or hash')
-    if timestamp is None or int(timestamp)<1_000_000_000_000:raise ValueError('missing chain timestamp')
-    nums=core.calc_numbers(h)
-    if len(nums)!=7:raise ValueError('not enough valid numbers in historic hash')
-    return {'number':int(number),'block':h,'timestamp':int(timestamp),
-            'numbers':[f'{v:02d}' for v in nums],'singleCount':core.calc_single_count(nums)}
+    if timestamp is None or int(timestamp)<1_000_000_000_000:
+        raise ValueError('missing chain timestamp')
+    return {'number':int(number),'block':h,'timestamp':int(timestamp)}
 
 
 def _range_blocks(start,end,ignore_live_priority=False):
@@ -112,10 +112,9 @@ def _save_raw(rows):
                 execute_values(cur,"""INSERT INTO historical_raw_blocks
                     (block_number,block_hash,block_time,numbers,single_count)
                     VALUES %s ON CONFLICT(block_number) DO UPDATE SET
-                    block_hash=EXCLUDED.block_hash,block_time=EXCLUDED.block_time,
-                    numbers=EXCLUDED.numbers,single_count=EXCLUDED.single_count""",
+                    block_hash=EXCLUDED.block_hash,block_time=EXCLUDED.block_time""",
                     [(r['number'],r['block'],core.datetime.fromtimestamp(r['timestamp']/1000,core.timezone.utc),
-                      json.dumps(r['numbers']),r['singleCount']) for r in rows])
+                      json.dumps([]),-1) for r in rows])
     finally:core.db_release(conn)
 
 
@@ -211,12 +210,12 @@ def fetch_period(index):
     raw=_warehouse_period(target-19,target)
     groups={}
     for g in range(1,21):
-        height=target-(20-g);r=valid.get(g) or raw.get(height)
+        height=target-(20-g); r=valid.get(g) or raw.get(height)
         if not r:raise RuntimeError(f'raw warehouse missing block {height}')
-        nums=r['numbers'];nums=json.loads(nums) if isinstance(nums,str) else nums
-        if not _verified_row({'block_number':height,'block_hash':r['block_hash'],'numbers':nums,'single_count':r['single_count']},height):
-            raise ValueError(f'raw warehouse verification failed {height}')
-        groups[str(g)]={'blockNumber':height,'block':r['block_hash'],'numbers':nums,'singleCount':int(r['single_count'])}
+        h=str(r['block_hash']); calculated=core.calc_numbers(h)
+        if len(calculated)!=7: raise ValueError(f'hash rule cannot produce 7 numbers at {height}')
+        nums=[f'{n:02d}' for n in calculated]; single=core.calc_single_count(calculated)
+        groups[str(g)]={'blockNumber':height,'block':h,'numbers':nums,'singleCount':single}
     core.persist_period_groups(ds,p,groups,target);return 'fetched'
 
 
