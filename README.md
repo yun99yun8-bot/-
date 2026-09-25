@@ -1,9 +1,8 @@
-# V10.5.1 HISTORY 10000 + LIVE CATCHUP
+# V10.6.1 RENDER WEB FIX
 
-- 历史主任务：固定约20万 TRON 历史区块，按当前360规则重建10000期。
-- 实时补采：后台同时检查最近30期，只写入目标区块已经真实存在的完整期；历史抓取不会导致新开奖漏采。
-- 实时期优先：实时补采发起时历史范围下载短暂让路，共享TRON限速器，避免互相抢接口。
-- 首页：显示20万组进度、10000期回填进度、最近开奖记录、单0-单7当前遗漏。
-- 不包含AI训练/预测/研究模块。
-
-注意：360规则的历史期号-区块映射仍沿用当前校准公式；如平台历史映射有额外跳变，应先校准后再把数据用于统计分析。
+- Fixes Render Web Service when its existing Start Command is `python app.py`.
+- `app.py` now keeps the HTTP server alive and listens on Render `$PORT` at `0.0.0.0`.
+- `worker.py` remains responsible for live raw capture + 200,000 historical raw blocks.
+- Historical 360-rule rebuild stays blocked until the frozen 200,000-block archive is complete.
+- Keeps V10.6 one-time dataset reset marker; redeploying this patch does not intentionally reset the same V10.6 dataset again.
+- `render.yaml` still recommends Gunicorn for Blueprint/new services, but this patch is compatible with the existing `python app.py` Web Service setting.

@@ -49,3 +49,7 @@ def status():
           'periods':{'status':state['status'],'rebuilt':rebuilt,'target':end-start+1,'percent':round(rebuilt*100/(end-start+1),2),'fetched':int(state['fetched_periods'] or 0),'existing':int(state['already_present'] or 0),'failed':int(state['failed_periods'] or 0),'error':state['last_error']},
           'recent':recent,'omission':omission})
     except Exception as exc:return jsonify({'ok':False,'message':str(exc)[:240]}),503
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', '10000'))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)

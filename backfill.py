@@ -59,22 +59,11 @@ def _initialize():
             with conn.cursor() as cur:
                 cur.execute("""INSERT INTO backfill_runtime
                     (singleton,start_index,end_index,next_index,status)
-                    VALUES(1,%s,%s,%s,'waiting_raw') ON CONFLICT(singleton) DO UPDATE SET
-                    start_index=EXCLUDED.start_index,end_index=EXCLUDED.end_index,
-                    next_index=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.next_index ELSE EXCLUDED.next_index END,
-                    status=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.status ELSE 'waiting_raw' END,
-                    already_present=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.already_present ELSE 0 END,
-                    fetched_periods=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.fetched_periods ELSE 0 END,
-                    failed_periods=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.failed_periods ELSE 0 END,last_error=NULL,updated_at=NOW()""",
+                    VALUES(1,%s,%s,%s,'waiting_raw') ON CONFLICT(singleton) DO NOTHING""",
                     (start,end,start))
                 cur.execute("""INSERT INTO raw_backfill_runtime
                     (singleton,start_block,end_block,next_block,status)
-                    VALUES(1,%s,%s,%s,'downloading') ON CONFLICT(singleton) DO UPDATE SET
-                    start_block=EXCLUDED.start_block,end_block=EXCLUDED.end_block,
-                    next_block=CASE WHEN raw_backfill_runtime.start_block=EXCLUDED.start_block AND raw_backfill_runtime.end_block=EXCLUDED.end_block THEN raw_backfill_runtime.next_block ELSE EXCLUDED.next_block END,
-                    status=CASE WHEN raw_backfill_runtime.start_block=EXCLUDED.start_block AND raw_backfill_runtime.end_block=EXCLUDED.end_block THEN raw_backfill_runtime.status ELSE 'downloading' END,
-                    stored_blocks=CASE WHEN raw_backfill_runtime.start_block=EXCLUDED.start_block AND raw_backfill_runtime.end_block=EXCLUDED.end_block THEN raw_backfill_runtime.stored_blocks ELSE 0 END,
-                    failed_batches=CASE WHEN raw_backfill_runtime.start_block=EXCLUDED.start_block AND raw_backfill_runtime.end_block=EXCLUDED.end_block THEN raw_backfill_runtime.failed_batches ELSE 0 END,last_error=NULL,updated_at=NOW()""",
+                    VALUES(1,%s,%s,%s,'downloading') ON CONFLICT(singleton) DO NOTHING""",
                     (first,last,first))
     finally:core.db_release(conn)
 
