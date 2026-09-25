@@ -66,7 +66,7 @@ _prediction_context = {'key': None, 'value': None}
 _prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.5.2-hash-family-research-1'
+MODEL_VERSION = 'v9.5.3-pre-result-priority-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -328,24 +328,43 @@ def should_poll_target(latest_live, target, countdown):
     return (latest_live is not None and int(latest_live)>=int(target)-3) or int(countdown)<=12
 
 
+def _block_timestamp_seconds(value):
+    if isinstance(value,datetime):return value.timestamp()
+    try:
+        numeric=float(value)
+        return numeric/1000 if numeric>10**11 else numeric
+    except (TypeError,ValueError):return None
+
+
+def target_poll_due(g17_timestamp, countdown, now_seconds):
+    """Reserve public HTTP for G17 until the target can plausibly exist."""
+    stamp=_block_timestamp_seconds(g17_timestamp)
+    if stamp is not None:
+        return now_seconds >= stamp+8.4
+    return int(countdown)<=4
+
+
 def g17_fast_worker():
     """Watch the last pre-result input even when ordinary block ingestion lags."""
-    last_target=None; attempts=0
+    last_target=None
     while True:
         worker_touch('g17-fast')
         try:
             ds,p,_,_=current_period(); target=period_target_block(ds,p)
-            if target!=last_target:
-                last_target=target; attempts=0
+            if target!=last_target:last_target=target
             g17=target-3
             with _live_blocks_lock:
                 seen=g17 in _live_blocks
                 latest=_live_latest_number
+                g16=_live_blocks.get(g17-1)
             countdown=calibrated_countdown_value()
-            if (not seen and attempts<4 and countdown>5
+            g16_time=_block_timestamp_seconds(g16.get('timestamp')) if g16 else None
+            # A fixed attempt limit can expire before G17 is produced. Keep
+            # watching until the actual block arrives or the result is observed.
+            if (not seen and countdown>4
                     and not _target_block_observed(target)
-                    and ((latest is not None and latest>=target-4) or countdown<=16)):
-                attempts+=1
+                    and ((latest is not None and latest>=target-4) or countdown<=10)
+                    and (g16_time is None or time.time()>=g16_time+2.3)):
                 try:
                     block,provider,latency_ms,_=fetch_block_fast(g17)
                     publish_block_live(block)
@@ -357,7 +376,7 @@ def g17_fast_worker():
                     worker_touch('g17-fast',exc)
         except Exception as exc:
             worker_touch('g17-fast',exc)
-        time.sleep(1.7)
+        time.sleep(0.9)
 
 
 def target_result_fast_worker():
@@ -371,6 +390,7 @@ def target_result_fast_worker():
             target = period_target_block(date_str, period)
             with _live_blocks_lock:
                 ready = target in _live_blocks
+                g17_row=_live_blocks.get(target-3)
             if target != last_target:
                 last_target = target
                 with _fast_diag_lock:
@@ -383,6 +403,10 @@ def target_result_fast_worker():
                 # Start when G17 is visible, or within the last 12 seconds if
                 # the normal ingestion thread lags. Preserve the known target.
                 if not should_poll_target(latest_live,target,calibrated_countdown_value()):
+                    time.sleep(sleep_for)
+                    continue
+                g17_time=g17_row.get('timestamp') if g17_row else None
+                if not target_poll_due(g17_time,calibrated_countdown_value(),time.time()):
                     time.sleep(sleep_for)
                     continue
                 try:
@@ -515,7 +539,11 @@ def get_db_pool():
         return _db_pool
     with _db_pool_lock:
         if _db_pool is None:
-            _db_pool = ThreadedConnectionPool(1, 4, DATABASE_URL, connect_timeout=5)
+            # The worker owns several independent collection and lifecycle
+            # threads. Four slots forced the G17 lock to compete with slow
+            # historical scans and repeatedly fail with pool exhaustion.
+            max_connections=4 if os.environ.get('RUN_EMBEDDED_WORKERS')=='0' else 12
+            _db_pool = ThreadedConnectionPool(1,max_connections,DATABASE_URL,connect_timeout=5)
     return _db_pool
 
 
@@ -1368,16 +1396,17 @@ def trace_period_lifecycle(date_str, period, target, event, groups=None, detail=
 
 def autonomous_period_worker():
     """Durable period state machine with persisted V8.1.3 lifecycle tracing."""
-    last_key=None; last_seen=-1; last_official=False
+    last_key=None; last_seen=-1; last_official=False; last_attempt_at=0
     while True:
         worker_touch('period-engine')
         try:
             ds,p,_,_=current_period(); target=period_target_block(ds,p); key=f'{ds}:{int(p):04d}'
             groups,_=collect_groups_live(ds,p); seen=len(groups); official=groups.get('20')
             if key != last_key:
-                last_key=key; last_seen=-1; last_official=False
+                last_key=key; last_seen=-1; last_official=False; last_attempt_at=0
                 trace_period_lifecycle(ds,p,target,'period_enter',groups)
-            if seen != last_seen:
+            changed=seen!=last_seen
+            if changed:
                 last_seen=seen
                 trace_period_lifecycle(ds,p,target,'groups_progress',groups)
             g17=all(str(i) in groups for i in range(1,18))
@@ -1401,17 +1430,26 @@ def autonomous_period_worker():
                         trace_period_lifecycle(ds,p,target,'verify_error',groups,str(exc)[:300])
                         set_period_runtime(ds,p,target,'RESULT_READY',seen,str(exc)[:300])
             elif g17:
-                trace_period_lifecycle(ds,p,target,'g17_ready',groups)
-                set_period_runtime(ds,p,target,'G17_READY',seen)
+                with _g17_durable_lock:
+                    already_locked=key in _g17_durable
+                if already_locked or time.monotonic()-last_attempt_at<0.7:
+                    time.sleep(0.20)
+                    continue
+                last_attempt_at=time.monotonic()
+                attempt_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds')
                 try:
-                    trace_period_lifecycle(ds,p,target,'lock_attempt',groups,increment_attempt=True)
-                    set_period_runtime(ds,p,target,'AI_LOCK_ATTEMPT',seen)
+                    # Prediction persistence has priority over lifecycle DB
+                    # writes; trace the actual start time after the attempt.
                     result=save_prediction_if_ready(ds,p,groups,target,force_backend=True)
                     flush_pending_ai_predictions()
                     row=prediction_exists(key)
+                    trace_period_lifecycle(ds,p,target,'g17_ready',groups,event_at=attempt_at)
+                    trace_period_lifecycle(ds,p,target,'lock_attempt',groups,
+                                           increment_attempt=True,event_at=attempt_at)
                     if row is not None:
                         trace_period_lifecycle(ds,p,target,'lock_success',groups,{'result':bool(result)})
                         set_period_runtime(ds,p,target,'AI_LOCKED',seen)
+                        with _g17_durable_lock:_g17_durable.add(key)
                     else:
                         trace_period_lifecycle(ds,p,target,'lock_not_durable',groups,
                             {'pending':key in _pending_ai_predictions})
@@ -1421,7 +1459,7 @@ def autonomous_period_worker():
                     trace_period_lifecycle(ds,p,target,'lock_error',groups,str(exc)[:300])
                     set_period_runtime(ds,p,target,'G17_READY',seen,str(exc)[:300])
             else:
-                set_period_runtime(ds,p,target,'COLLECTING',seen)
+                if changed:set_period_runtime(ds,p,target,'COLLECTING',seen)
         except Exception as exc:
             worker_touch('period-engine',exc)
         time.sleep(0.20)

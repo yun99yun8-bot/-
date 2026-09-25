@@ -5,6 +5,7 @@ import math
 import queue
 import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 import hash_research
 
@@ -14,11 +15,13 @@ import hash_research
 source = ast.parse(Path(__file__).with_name('app.py').read_text())
 names = {'_norm_scores', '_candidate_rank', 'research_model_performance',
          '_hash_context_scores', '_relation_scores', 'v9_research_ensemble',
-         'should_poll_target', 'outside_candidate', 'enqueue_block_for_db',
+         'should_poll_target','target_poll_due','_block_timestamp_seconds',
+         'outside_candidate', 'enqueue_block_for_db',
          'target_result_fast_worker'}
 module = ast.Module(body=[n for n in source.body if isinstance(n, ast.FunctionDef)
                           and n.name in names], type_ignores=[])
 scope = {'json': json, 'RealDictCursor': object(), 'hash_research': hash_research,
+         'datetime':datetime,
          'queue': queue}
 exec(compile(module, '<research>', 'exec'), scope)
 
@@ -65,6 +68,13 @@ class ResearchTests(unittest.TestCase):
         self.assertTrue(should_poll(97,100,42))
         self.assertTrue(should_poll(None,100,12))
         self.assertFalse(should_poll(None,100,13))
+
+    def test_target_poll_reserves_public_requests_until_target_slot(self):
+        due=scope['target_poll_due']
+        self.assertFalse(due(1_780_000_000_000,8,1_780_000_007))
+        self.assertTrue(due(1_780_000_000_000,8,1_780_000_008.5))
+        self.assertFalse(due(None,8,1_780_000_007))
+        self.assertTrue(due(None,4,1_780_000_007))
 
     def test_group20_uses_independent_priority_writer_queue(self):
         scope['_result_db_write_queue']=queue.Queue()
