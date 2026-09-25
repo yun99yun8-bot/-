@@ -68,7 +68,7 @@ _prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
 MODEL_VERSION = 'v10.2-fast-raw-warehouse-old-only-training'
-RESEARCH_VERSION = 'research-family-v4-old-only'
+RESEARCH_VERSION = 'research-family-v5-fixed-10000-loop'
 RESEARCH_ONLY_MODE = True
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}

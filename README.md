@@ -1,10 +1,10 @@
-# V10.2 FAST RAW WAREHOUSE / OLD-ONLY TRAINING
+# V10.3 FAST RAW WAREHOUSE / OLD-ONLY TRAINING
 
 - Stage 1: bulk-download the historical TRON block span (about 200k blocks) in 100-block range calls into `historical_raw_blocks`.
 - Stage 2: rebuild about 10,000 periods locally from that permanent raw warehouse using the existing 360-period calibration rule.
 - Raw hashes are never guessed; incomplete ranges retry. Live collection keeps priority.
 - Training is historical-only chronological walk-forward: each archived prediction is generated from older observed records before that archived label is added.
-- Live/future trial workers are disabled in V10.2.
+- Live/future trial workers are disabled in V10.3.
 - Training report adds 50/100/300/1000-period rates and hit/miss streak diagnostics.
 
 Existing V10.1 tables are migrated automatically by `init_db()`.
@@ -38,3 +38,6 @@ Existing V10.1 tables are migrated automatically by `init_db()`.
 - 原确认的360期尾数 `(6,4,2,0,8)`、每期第20组最终结果、哈希拆号规则和七号码波色继续沿用。原始区块表按既有七天策略维护；归档的 `period_groups` 未设置同样的定期删除。
 
 首次全库扫描和训练期间采集由独立线程持续运行。资源较少的数据库仍可能在首次扫描时出现延迟；报告中的 Worker 心跳、练习进度和首页开奖结果可用于观察。没有线上数据库访问时，软件包测试不能代替真实历史命中率。
+
+
+V10.3: fixed 10,000-period archive loops; resets model memory each cycle; excludes live/new periods from research; refits every 100 replay periods; reports top two methods and 单0-7 max/current omission gaps.

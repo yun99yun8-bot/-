@@ -18,10 +18,13 @@ TRAIN=1000
 REFIT=100
 RECENT=1000
 PAGE=80
+ARCHIVE_PERIODS=10000
+
 
 
 class Practice:
-    def __init__(self):
+    def __init__(self, epoch=1):
+        self.epoch=epoch
         self.window=deque(maxlen=TRAIN)
         self.history=deque(maxlen=30)   # newest first; observed outcomes only
         self.recent=deque(maxlen=RECENT)
@@ -39,6 +42,9 @@ class Practice:
         self.saved_at=None
         self.saved_status=None
         self.lock=threading.RLock()
+        self.omission_last={i:None for i in range(8)}
+        self.omission_max={i:0 for i in range(8)}
+        self.omission_current={i:0 for i in range(8)}
 
     def _fit(self, tune=False):
         window=list(self.window)
@@ -57,6 +63,15 @@ class Practice:
                 raise ValueError('practice periods must be strictly chronological')
             self.last_key=key
             if not isinstance(actual,int) or actual not in range(8):return
+            # Omission statistics are descriptive only and are updated from the
+            # archived label after the prediction boundary. They are never read as
+            # a future label by a candidate.
+            for i in range(8):
+                if i==actual:
+                    self.omission_current[i]=0
+                else:
+                    self.omission_current[i]+=1
+                    self.omission_max[i]=max(self.omission_max[i],self.omission_current[i])
             prior=list(self.history)
             feats=model.features(groups,prior)
             has_complete_hashes=feats is not None
@@ -124,6 +139,7 @@ class Practice:
                       'bestHitStreak1000':best_hit,'bestMissStreak1000':best_miss})
             ranking.sort(key=lambda r:(-r['recentHits'], -r['hits'],r['method']))
             return {'status':status if self.seen>=TRAIN else 'waiting_for_1000',
+                    'epoch':self.epoch,'archivePeriods':ARCHIVE_PERIODS,
                     'trainingPeriods':min(self.seen,TRAIN),'historicalPeriodsRead':self.seen,
                     'completePreResultPeriods':self.complete,'replayPeriods':self.tested,
                     'trainingFrom':self.training_from,'trainingThrough':self.training_through,
@@ -133,6 +149,9 @@ class Practice:
                     'evaluationMode':'historical_walk_forward_only',
                     'labelPolicy':'each prediction is generated before that archived period result is added to training',
                     'usesUnseenFutureResults':False,'liveTrialEnabled':False,
+                    'fixedArchiveOnly':True,'newPeriodsUsedForTraining':False,
+                    'selfRepair':'refit every 100 replay periods; retune on each fresh archive cycle',
+                    'omission':{str(i):{'current':self.omission_current[i],'max':self.omission_max[i]} for i in range(8)},
                     'recentPractice':list(reversed(self.last_rows)), 'lastProcessed':self.last_key}
 
     def snapshot(self):
@@ -218,7 +237,8 @@ def _save_practice_rows(rows):
 def practice_worker():
     time.sleep(30)  # allow collection and the backfill checkpoint to initialize
     import backfill
-    state=Practice()
+    epoch=1
+    state=Practice(epoch)
     last_save=time.monotonic()
     pending=[]
     known_revision=None
@@ -238,12 +258,30 @@ def practice_worker():
                         # have been restored. Retrospective rows are revised,
                         # genuine future trials remain immutable.
                         if pending:_save_practice_rows(pending);pending=[]
-                        state=Practice();last_save=0
+                        epoch+=1;state=Practice(epoch);last_save=0
                         known_revision=rev
             if pending:
                 _save_practice_rows(pending)
                 pending=[]
+            if state.seen>=ARCHIVE_PERIODS:
+                _persist(state,'archive_cycle_complete')
+                # Forget the learned labels/models and replay the SAME fixed archive
+                # again. New/live periods are deliberately excluded from research.
+                epoch+=1
+                state=Practice(epoch)
+                pending=[]
+                last_save=time.monotonic()
+                time.sleep(2)
             rows=history_pages(state.last_key or '')
+            # Never let a cycle consume more than the fixed 10,000 archived periods.
+            if rows and state.seen + len({r['period_key'] for r in rows}) > ARCHIVE_PERIODS:
+                allowed=[];keys=[]
+                for r in rows:
+                    if r['period_key'] not in keys:
+                        if state.seen+len(keys)>=ARCHIVE_PERIODS: break
+                        keys.append(r['period_key'])
+                    allowed.append(r)
+                rows=allowed
             if not rows:
                 if time.monotonic()-last_save>20:
                     active=backfill_info and backfill_info['status']!='complete'
