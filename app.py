@@ -66,7 +66,7 @@ _prediction_context = {'key': None, 'value': None}
 _prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.5.1-g17-timeline-1'
+MODEL_VERSION = 'v9.5.2-hash-family-research-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -623,6 +623,14 @@ def init_db():
                     singleton SMALLINT PRIMARY KEY CHECK (singleton=1),
                     trained_through TEXT, snapshot JSONB NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+                cur.execute("""CREATE TABLE IF NOT EXISTS research_predictions (
+                    period_key TEXT NOT NULL, period_date DATE NOT NULL,
+                    period_no INTEGER NOT NULL, target_block BIGINT NOT NULL,
+                    candidate TEXT NOT NULL, prediction SMALLINT NOT NULL,
+                    scores JSONB NOT NULL, model_version TEXT NOT NULL,
+                    trained_through TEXT NOT NULL, locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY(period_key,candidate))""")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_research_predictions_date ON research_predictions(period_date DESC,period_no DESC)")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS system_events (
                         id BIGSERIAL PRIMARY KEY,
@@ -1485,8 +1493,34 @@ def get_hash_model_snapshot(current_key):
         if conn is not None:db_release(conn)
 
 
+def save_history_shadow_prediction(date_str,period,target,historical,snapshot):
+    """Freeze a separate research-only forecast before the target block exists."""
+    key=f'{date_str}:{int(period):04d}'
+    if not snapshot or not snapshot.get('trainedThrough') or snapshot['trainedThrough']>=key:
+        return False
+    if _target_block_observed(target):return False
+    scores=hash_research.history_only_scores(snapshot,historical)
+    if scores is None:return False
+    rank=max(range(8),key=lambda i:(scores[i],-i))
+    conn=db_connect(retries=0)
+    if conn is None:return False
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO research_predictions
+                    (period_key,period_date,period_no,target_block,candidate,prediction,scores,model_version,trained_through)
+                    SELECT %s,%s,%s,%s,'history_only',%s,%s::jsonb,%s,%s
+                    WHERE NOT EXISTS (SELECT 1 FROM tron_blocks WHERE block_number=%s)
+                    ON CONFLICT(period_key,candidate) DO NOTHING""",
+                    (key,date_str,int(period),int(target),rank,json.dumps(scores),
+                     MODEL_VERSION,snapshot['trainedThrough'],int(target)))
+                return True
+    finally:db_release(conn)
+
+
 def prediction_context_worker():
     """Prepare DB-heavy prior-period evidence before the G17 deadline."""
+    shadow_written=None
     while True:
         worker_touch('prediction-context')
         try:
@@ -1495,12 +1529,23 @@ def prediction_context_worker():
                 ready=_prediction_context['key']==key and _prediction_context['value'] is not None
             if not ready:
                 historical=get_historical_official_singles(ds,p)
+                snapshot=get_hash_model_snapshot(key)
+                # Research-only history forecast has no need to wait for the
+                # expensive group-position and ensemble performance queries.
+                if shadow_written!=key and save_history_shadow_prediction(
+                        ds,p,period_target_block(ds,p),historical,snapshot):
+                    shadow_written=key
                 relation=group20_relation_model(ds,p)
                 performance=research_model_performance(500)
-                snapshot=get_hash_model_snapshot(key)
                 with _prediction_context_lock:
                     _prediction_context.update({'key':key,'value':{'historical':historical,
                         'relation':relation,'performance':performance,'hashSnapshot':snapshot}})
+            if shadow_written!=key:
+                with _prediction_context_lock:
+                    context=_prediction_context['value'] if _prediction_context['key']==key else None
+                if context and save_history_shadow_prediction(ds,p,period_target_block(ds,p),
+                                                context['historical'],context['hashSnapshot']):
+                    shadow_written=key
         except Exception as exc:
             worker_touch('prediction-context',exc)
         time.sleep(2.0)
@@ -2323,7 +2368,7 @@ def v9_research_ensemble(groups, historical, relation=None, hash_snapshot=None, 
     relation_s=_relation_scores(groups,relation)
     parts={'long':long_s,'short':short_s,'structure17':struct,'transition':trans,
            'omission':omit,'hash_context':hash_context,'relation':relation_s,'binomial':binomial}
-    learned_scores=hash_research.snapshot_scores(hash_snapshot,groups)
+    learned_scores=hash_research.snapshot_scores(hash_snapshot,groups,hist)
     if learned_scores is not None: parts['hash_learned']=learned_scores
 
     perf=performance if performance is not None else research_model_performance(500)
@@ -2375,7 +2420,7 @@ def v9_research_ensemble(groups, historical, relation=None, hash_snapshot=None, 
                         'edgeStatus':edge,'bestComplexTop1':round(best_complex,2),
                         'baselineTop1':round(base_rate,2),'weightMode':'exploratory_prior_plus_strict_evidence',
                         'weightDecisions':weight_decisions,
-                        'hashModel':{k:hash_snapshot.get(k) for k in ('status','sample','testSample','trainedThrough','baselineLoss','modelLoss','active')}
+                        'hashModel':{k:hash_snapshot.get(k) for k in ('status','sample','testSample','trainedThrough','baselineLoss','modelLoss','active','selectedFamily')}
                                     if hash_snapshot else None}}
 
 def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=None, force_backend=False):
@@ -2569,7 +2614,8 @@ def ai_audit_summary(rows, snapshot=None, current_version=None):
             'latestSavedVersion':str(rows[0].get('model_version') or '未标记版本') if rows else None,
             'invalidReasons':reasons,'windows':windows,'examples':issues,
             'hashModel':{k:snap.get(k) for k in ('status','sample','trainSample','tuneSample',
-                'testSample','active','alpha','baselineLoss','modelLoss','baselineTop1','modelTop1','trainedThrough')},
+            'testSample','active','alpha','baselineLoss','modelLoss','baselineTop1','modelTop1','trainedThrough',
+            'selectedFamily','featureFamilies','holdoutHalves')},
             'platformAlignment':'未核对平台原始开奖；本诊断仅核对区块与已存预测'}
 
 
@@ -3061,6 +3107,23 @@ def _timeline_runtime_row(row):
             'lockSource':detail.get('source')}
 
 
+def history_shadow_audit(rows):
+    """Evaluate immutable research forecasts against original chain timestamps."""
+    valid=hits=baseline3=late=missing=mismatch=0
+    for r in rows:
+        ds=r['period_date'].isoformat() if hasattr(r['period_date'],'isoformat') else str(r['period_date'])
+        if int(r['target_block'])!=period_target_block(ds,int(r['period_no'])):
+            mismatch+=1;continue
+        block=r.get('block_time'); locked=r.get('locked_at')
+        if block is None:missing+=1;continue
+        if locked is None or locked>=block:late+=1;continue
+        actual=int(r['chain_single']);valid+=1
+        hits+=int(int(r['prediction'])==actual);baseline3+=int(actual==3)
+    return {'saved':len(rows),'valid':valid,'hits':hits,'baseline3Hits':baseline3,
+            'late':late,'missingResult':missing,'targetMismatch':mismatch,
+            'top1Rate':round(100*hits/valid,2) if valid else None}
+
+
 @app.get('/api/ai-audit')
 def ai_audit():
     """On-demand evidence breakdown; never recalculates an old prediction."""
@@ -3093,6 +3156,13 @@ def ai_audit():
                           LEFT JOIN ai_predictions p ON p.period_key=r.period_key
                           ORDER BY r.period_date DESC,r.period_no DESC LIMIT 8""")
             runtime=cur.fetchall()
+            cur.execute("""SELECT s.period_date,s.period_no,s.target_block,s.prediction,
+                          s.locked_at,b.block_time,b.single_count AS chain_single
+                          FROM research_predictions s
+                          LEFT JOIN tron_blocks b ON b.block_number=s.target_block
+                          WHERE s.candidate='history_only' AND s.model_version=%s
+                          ORDER BY s.period_date DESC,s.period_no DESC LIMIT 1000""",(MODEL_VERSION,))
+            shadow_rows=cur.fetchall()
         snapshot=stored['snapshot'] if stored else None
         if isinstance(snapshot,str):snapshot=json.loads(snapshot)
         recent_runtime=[_timeline_runtime_row(row) for row in runtime]
@@ -3101,6 +3171,7 @@ def ai_audit():
         return jsonify({'ok':True,'currentModelVersion':MODEL_VERSION,
                         'workerModelVersion':worker_version,'workerAgeSeconds':round(worker_age,1) if worker_age is not None else None,
                         'recentRuntime':recent_runtime,
+                        'historyOnlyShadow':history_shadow_audit(shadow_rows),
                         'audit':ai_audit_summary(rows,snapshot,MODEL_VERSION)})
     except Exception as exc:
         return jsonify({'ok':False,'error':type(exc).__name__,'message':str(exc)[:140]}),503

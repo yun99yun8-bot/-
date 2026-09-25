@@ -7,7 +7,7 @@ import threading
 import unittest
 
 tree=ast.parse(Path(__file__).with_name('app.py').read_text())
-funcs={'period_index','period_target_block','ai_audit_summary','_target_block_observed','_persist_ai_payload','_timeline_runtime_row'}
+funcs={'period_index','period_target_block','ai_audit_summary','_target_block_observed','_persist_ai_payload','_timeline_runtime_row','history_shadow_audit'}
 consts={'TAIL_ANCHOR_INDEX','TAIL_INTERVAL_PERIODS','TAIL_SEQUENCE'}
 nodes=[n for n in tree.body if (isinstance(n,ast.FunctionDef) and n.name in funcs)
        or (isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in consts for t in n.targets))]
@@ -17,6 +17,20 @@ exec(compile(ast.Module(body=nodes,type_ignores=[]),'<audit>','exec'),scope)
 
 
 class AIAuditTests(unittest.TestCase):
+    def test_historical_shadow_rejects_late_and_wrong_target(self):
+        target=scope['period_target_block']('2026-09-25',275)
+        block=datetime(2026,9,24,20,36,tzinfo=timezone.utc)
+        row={'period_date':date(2026,9,25),'period_no':275,'target_block':target,
+             'locked_at':block-timedelta(seconds=3),'block_time':block,
+             'prediction':2,'chain_single':2}
+        result=scope['history_shadow_audit']([row,dict(row,locked_at=block),
+                                               dict(row,target_block=target-1)])
+        self.assertEqual(result['saved'],3)
+        self.assertEqual(result['valid'],1)
+        self.assertEqual(result['hits'],1)
+        self.assertEqual(result['late'],1)
+        self.assertEqual(result['targetMismatch'],1)
+
     def test_chain_time_and_first_seen_explain_late_lock(self):
         base=datetime(2026,9,25,14,56,tzinfo=timezone.utc)
         row={'period_key':'2026-09-25:1377','state':'AI_LOCKED','groups_seen':17,

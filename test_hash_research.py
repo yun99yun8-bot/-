@@ -18,6 +18,14 @@ def example(period, signal, actual, missing=None):
 
 
 class HashResearchTests(unittest.TestCase):
+    def test_historical_shadow_uses_only_prior_outcomes(self):
+        rows=example(1,'1',2)+example(2,'9',5)+example(3,'1',2)
+        earlier=model.build_examples(rows)
+        self.assertEqual(earlier[1][1]['history_last'],'2')
+        self.assertEqual(earlier[2][1]['history_last'],'5')
+        changed=example(1,'1',2)+example(2,'9',5)+example(3,'1',7)
+        self.assertEqual(model.build_examples(changed)[2][1],earlier[2][1])
+
     def test_complete_period_and_pre_result_only(self):
         rows=example(1,'1',2)+example(2,'9',5,missing=16)
         found=model.build_examples(rows)
@@ -36,6 +44,11 @@ class HashResearchTests(unittest.TestCase):
         self.assertTrue(snap['active'])
         self.assertEqual(snap['sample'],800)
         self.assertLess(snap['modelLoss'],snap['baselineLoss'])
+        self.assertEqual(set(snap['featureFamilies']),set(model.FEATURE_FAMILIES))
+        self.assertIn(snap['selectedFamily'],model.FEATURE_FAMILIES)
+        shadow=model.history_only_scores(snap,[5,2,5,2])
+        self.assertEqual(len(shadow),8)
+        self.assertAlmostEqual(sum(shadow),1.0)
         current={str(r['group_no']):{'block':r['block_hash'],'singleCount':r['single_count']}
                  for r in example(801,'1',2) if r['group_no']<=17}
         scores=model.snapshot_scores(snap,current)

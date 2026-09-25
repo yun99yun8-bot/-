@@ -85,7 +85,7 @@
 
       <section class="history-panel" data-panel="blocks" hidden><div class="history-panel-head"><button class="history-back">‹ 功能导航</button><div><div class="history-eyebrow">BLOCK DETAIL</div><h2>20组区块数据</h2><p>严格对应当前期第1～20组，缺失组保持等待状态。</p></div></div><section class="card history-section"><div class="group-table-wrap"><table class="group-table"><thead><tr><th>组</th><th>区块</th><th>单几</th><th>7个号码</th></tr></thead><tbody id="groupTableBody"><tr><td colspan="4">等待数据</td></tr></tbody></table></div></section></section>
 
-      <section class="history-panel" data-panel="verify" hidden><div class="history-panel-head"><button class="history-back">‹ 功能导航</button><div><div class="history-eyebrow">MODEL CHECK</div><h2>AI验证统计</h2><p>只统计开奖前已保存的预测，并同时观察当前期1～18组描述性分布。</p></div></div><section class="card history-section"><div class="history-status" id="historyModel">正在读取历史模型数据…</div><div class="verify-divider">最近1000条预测诊断 <button type="button" id="refreshAIAudit">刷新</button></div><div class="history-status" id="aiAudit">点击本模块后核对完整训练期数与真实命中</div><div class="verify-divider">当前期1～18组分布</div><div class="prob-grid" id="probGrid"><div class="prob-item" data-prob-single="3">单3<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="4">单4<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="5">单5<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="2">单2<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="0">单0<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="7">单7<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="1">单1<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div></div></section></section>
+      <section class="history-panel" data-panel="verify" hidden><div class="history-panel-head"><button class="history-back">‹ 功能导航</button><div><div class="history-eyebrow">MODEL CHECK</div><h2>AI验证统计</h2><p>只统计开奖前已保存的预测，并同时观察当前期1～18组描述性分布。</p></div></div><section class="card history-section"><div class="history-status" id="historyModel">正在读取历史模型数据…</div><div class="verify-divider">最近1000条预测诊断 <button type="button" id="refreshAIAudit">刷新</button></div><div class="history-status" id="aiAudit">点击本模块后核对完整训练期数与真实命中</div><div class="verify-divider">哈希多模型验证</div><div class="history-status hash-research" id="hashResearch">等待训练结果</div><div class="verify-divider">当前期1～18组分布</div><div class="prob-grid" id="probGrid"><div class="prob-item" data-prob-single="3">单3<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="4">单4<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="5">单5<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="2">单2<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="0">单0<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="7">单7<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="1">单1<small>次数：--次</small><small>概率：--%</small></div><div class="prob-item" data-prob-single="6">单6<small>次数：--次</small><small>概率：--%</small></div></div></section></section>
     </main>
   </div>
 <script>
@@ -123,6 +123,25 @@
     xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;
       if(xhr.status<200||xhr.status>=300){box.textContent='诊断暂不可用，请检查数据库连接。';return;}
       try{var data=JSON.parse(xhr.responseText),a=data.audit||{},w=a.windows||{},v=w['1000']||{},c=a.invalidReasons||{},h=a.hashModel||{},late=a.lateLockSeconds||{},pred=a.predictedCounts||{},actual=a.actualCounts||{},versions=a.modelVersions||{},current=data.currentModelVersion||'未知',latest=a.latestSavedVersion||'无',newStats=a.currentVersionStats||{};
+        var research=document.getElementById('hashResearch');
+        if(research){
+          var families=h.featureFamilies||{},names={history_only:'纯历史序列',group_positions:'17组位置结构',hash_shape:'哈希字符结构',combined:'综合特征'};
+          if(Object.keys(families).length){
+            var base=h.baselineTop1,held=h.testSample;
+            var lines=['训练'+Number(h.trainSample||0)+'期、调参'+Number(h.tuneSample||0)+'期、最后留出'+Number(held||0)+'期；基础第一名 '+Number(base||0)+'/'+Number(held||0)+'。'];
+            Object.keys(names).forEach(function(key){var f=families[key];if(!f)return;var score=f.holdout||{};
+              lines.push(names[key]+(f.selected?'（调参选中）':'')+'：留出第一名 '+Number(score.top1||0)+'/'+Number(score.n||0)+
+                '，对照 '+Number(score.baselineTop1||0)+'/'+Number(score.n||0)+
+                '，预测误差 '+(score.loss==null?'--':Number(score.loss).toFixed(3)));
+            });
+            lines.push(h.active?'选中模型通过双段验证，进入综合预测。':'选中模型未通过双段验证，历史哈希模型暂不启用。');
+            lines.push('留出对照只用于验收，不用于挑选赢家；线上第一名成绩仍须以开奖前锁定的新期次为准。');
+            var sh=data.historyOnlyShadow||{};
+            lines.push('纯历史方案真实新期次：已保存'+Number(sh.saved||0)+'期，开奖前有效'+Number(sh.valid||0)+'期，第一名命中'+Number(sh.hits||0)+'/'+Number(sh.valid||0)+
+              '，固定单3对照'+Number(sh.baseline3Hits||0)+'/'+Number(sh.valid||0)+'；迟到'+Number(sh.late||0)+'期。');
+            research.textContent=lines.join('\n');
+          }else research.textContent='多模型训练尚未完成；请核对 Web 与 Background Worker 版本并等待后台训练。';
+        }
         var pct=function(x){return x==null?'--':Number(x).toFixed(1)+'%';};
         var distribution=function(counts){return Array.from({length:8},function(_,i){return '单'+i+':'+Number(counts[String(i)]||0);}).join('、');};
         var cohort=versions[current]||{},versionStatus=latest===current?'当前版本已保存预测':'最近保存的预测尚非当前版本';

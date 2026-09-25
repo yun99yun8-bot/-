@@ -167,3 +167,4 @@ html,body{margin:0;padding:0;background:#f5f7fb;color:#24324b;font-family:-apple
 .ai-spectrum-item{display:flex;justify-content:space-between;align-items:center;gap:3px;padding:5px 6px;border:1px solid #e3e8ef;border-radius:7px;background:#fff;font-size:10px;color:#5b6880}
 .ai-spectrum-item b{color:#334155}
 @media(max-width:360px){.ai-spectrum-item{padding:5px 3px;font-size:9px}}
+.hash-research{white-space:pre-line;line-height:1.75}
