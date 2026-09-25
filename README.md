@@ -1,12 +1,10 @@
-# V10.4 — 10000期历史数据专用采集版
+# V10.5 HISTORY 10000 CLEAN ONLY
 
-本版删除运行层面的实时开奖、遗漏统计、AI训练和预测，只保留两个后台任务：
+纯历史采集版。旧首页、遗漏、开奖记录、训练/预测前端均不再提供。
 
-1. 批量读取约20万组已经存在的 TRON 历史区块，保存到 `historical_raw_blocks`。
-2. 原始仓库完整后，只从本地数据库读取这些区块，沿用项目现有360规则重建10000期，每期20组写入 `period_groups`。
+唯一流程：
+1. 下载约20万组真实 TRON 历史区块到 historical_raw_blocks。
+2. 原始区块完整后，按现有360规则从本地数据库回填10000期到 period_groups。
+3. 首页 `/` 只显示两段进度和当前状态，每2秒刷新。
 
-网页只显示两个进度条/状态，不展示开奖记录或训练内容。任务支持断点续传、失败重试和已有区块复用。
-
-默认历史请求节流改为 0.25 秒/次，因为本版没有实时采集与之竞争；若公共节点出现429，会沿用自动冷却机制。部署环境可用 `TRON_MIN_REQUEST_INTERVAL` 调整间隔。TRON官方将 `getblockbylimitnext` 定义为区块范围扫描接口，适合 backfill/sequential scan；本项目使用 SolidityNode 历史范围接口。
-
-注意：链上区块/Block ID 是真实读取的；10000期的平台期号对应继续使用现有360期映射规则。锚点以前的映射属于规则倒推，仍建议之后拿平台历史数据抽样校验。
+Render：Web 使用 `gunicorn app:app --workers 2 --threads 4 --timeout 45`；Worker 使用 `python worker.py`。两者必须配置同一个 DATABASE_URL。

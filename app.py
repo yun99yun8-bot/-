@@ -1,4 +1,4 @@
-"""V10.4 progress-only web UI for the 200k-block / 10k-period historical job."""
+"""V10.5 clean progress-only web UI for the 200k-block / 10k-period historical job."""
 import os
 from pathlib import Path
 os.environ['RUN_EMBEDDED_WORKERS']='0'
@@ -11,7 +11,7 @@ app=Flask(__name__)
 @app.get('/')
 def index(): return Response((ROOT/'index.html').read_text(encoding='utf-8'),mimetype='text/html; charset=utf-8',headers={'Cache-Control':'no-store'})
 @app.get('/style.css')
-def css(): return Response((ROOT/'style.css').read_text(encoding='utf-8'),mimetype='text/css; charset=utf-8')
+def css(): return Response((ROOT/'style.css').read_text(encoding='utf-8'),mimetype='text/css; charset=utf-8',headers={'Cache-Control':'no-store'})
 @app.get('/api/status')
 def status():
     try:
