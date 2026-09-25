@@ -84,8 +84,8 @@ def _normalize(raw):
             'numbers':[f'{v:02d}' for v in nums],'singleCount':core.calc_single_count(nums)}
 
 
-def _range_blocks(start,end):
-    if _live_has_priority():raise RuntimeError('live collection has priority')
+def _range_blocks(start,end,ignore_live_priority=False):
+    if (not ignore_live_priority) and _live_has_priority():raise RuntimeError('live collection has priority')
     url=f'{core.TRON_SOLIDITY_API}/getblockbylimitnext'
     payload=core._get_json(url,method='POST',payload={'startNum':int(start),'endNum':int(end)})
     if isinstance(payload,dict) and payload.get('Error'):raise RuntimeError('TRON range API: '+str(payload['Error'])[:120])
@@ -130,7 +130,8 @@ def _raw_count(start,end):
 
 
 def raw_download_worker():
-    time.sleep(12);consecutive=0
+    print('[历史] 20万组下载线程已启动', flush=True)
+    time.sleep(3);consecutive=0
     while True:
         core.worker_touch('raw-backfill')
         try:
@@ -156,8 +157,11 @@ def raw_download_worker():
                     with conn.cursor() as cur:cur.execute("UPDATE raw_backfill_runtime SET next_block=%s,stored_blocks=stored_blocks+%s,status='downloading',last_error=NULL,updated_at=NOW() WHERE singleton=1",(stop,len(rows)))
             finally:core.db_release(conn)
             consecutive=0
+            stored=_raw_count(int(raw['start_block']),end)
+            expected=end-int(raw['start_block'])+1
+            print(f'[历史] {stored}/{expected} ({stored*100/expected:.2f}%) | 本批 {start}-{stop-1}', flush=True)
         except Exception as exc:
-            consecutive+=1;core.worker_touch('raw-backfill',exc)
+            consecutive+=1;core.worker_touch('raw-backfill',exc);print(f'[历史错误] {type(exc).__name__}: {exc}', flush=True)
             try:
                 conn=core.db_connect(retries=0)
                 if conn:

@@ -3,7 +3,7 @@ import os, signal, socket, threading, time, json
 import collector_core as core
 import backfill
 
-DATASET_ID='V10.6_RAW_FIRST_20260926'
+DATASET_ID='V10.6.2_RESET_RAW_FIRST_PLUS_LIVE_20260926'
 if not core.DATABASE_URL: raise SystemExit('DATABASE_URL is required')
 if not core.init_db(): raise SystemExit('Database initialization failed')
 
@@ -31,9 +31,15 @@ def reset_database_once():
         return True
     finally: core.db_release(conn)
 
-reset_database_once()
+did_reset=reset_database_once()
+print(f'[启动] V10.6.2 Worker | 数据库重置={did_reset}', flush=True)
 # Freeze the 10,000-period/200k-block historical window immediately after reset.
 backfill._initialize()
+try:
+    st=backfill.read_status(); raw=(st or {}).get('raw') or {}
+    print(f"[历史范围] {raw.get('start_block')} -> {raw.get('end_block')} | 目标20万组", flush=True)
+except Exception as exc:
+    print(f'[初始化错误] {exc}', flush=True)
 
 def _save_live_raw(rows):
     if not rows:return
@@ -50,8 +56,9 @@ def _save_live_raw(rows):
     finally: core.db_release(conn)
 
 def live_raw_worker():
-    """Save new blocks only. It does not run 360 rebuild while the 200k archive is downloading."""
-    time.sleep(3); last=None
+    """Save new blocks and publish them to the live period materializer."""
+    print('[实时] 新区块/新开奖采集线程已启动', flush=True)
+    time.sleep(1); last=None
     while True:
         core.worker_touch('live-raw')
         try:
@@ -60,19 +67,21 @@ def live_raw_worker():
                 # Start at current chain tip; the historical worker owns the frozen older 200k range.
                 row={'number':latest_no,'block':latest['block'],'timestamp':latest['timestamp'],
                      'numbers':[f'{v:02d}' for v in core.calc_numbers(latest['block'])]}
-                row['singleCount']=core.calc_single_count([int(v) for v in row['numbers']]); _save_live_raw([row]); last=latest_no
+                row['singleCount']=core.calc_single_count([int(v) for v in row['numbers']]); _save_live_raw([row]); core.publish_block_live(row); last=latest_no; print(f'[实时] 起点区块 {latest_no}', flush=True)
             elif latest_no>last:
                 start=last+1
                 while start<=latest_no:
                     stop=min(start+100,latest_no+1)
                     backfill.mark_live_priority(2.0)
-                    rows=backfill._range_blocks(start,stop); _save_live_raw(rows)
+                    rows=backfill._range_blocks(start,stop,ignore_live_priority=True); _save_live_raw(rows)
+                    for r in rows: core.publish_block_live(r)
                     last=stop-1; start=stop
+                    print(f'[实时] 已保存新区块至 {last}', flush=True)
             time.sleep(2.0)
         except Exception as exc:
-            core.worker_touch('live-raw',exc); time.sleep(2)
+            core.worker_touch('live-raw',exc); print(f'[实时错误] {type(exc).__name__}: {exc}', flush=True); time.sleep(2)
 
-targets={'raw-200k':backfill.raw_download_worker,'rebuild-after-raw':backfill.backfill_worker,'live-raw':live_raw_worker}
+targets={'raw-200k':backfill.raw_download_worker,'rebuild-after-raw':backfill.backfill_worker,'live-raw':live_raw_worker,'live-periods':core.smart_db_worker,'omission':core.omission_engine_worker}
 threads={}; stopping=False
 def stop(*_):
     global stopping; stopping=True
@@ -84,4 +93,8 @@ while not stopping:
         if t is None or not t.is_alive():
             t=threading.Thread(target=target,name=label,daemon=True); threads[label]=t; t.start()
     core.persist_service_heartbeat(name,'worker',instance,'ONLINE',{'dataset':DATASET_ID,'runningEngines':[k for k,t in threads.items() if t.is_alive()]})
-    time.sleep(5)
+    try:
+        st=backfill.read_status(); raw=(st or {}).get('raw') or {}
+        print(f"[状态] 历史={raw.get('stored_blocks',0)}/200000 {raw.get('status')} | 回填={(st or {}).get('status')} | 线程={','.join(k for k,t in threads.items() if t.is_alive())}", flush=True)
+    except Exception as exc: print(f'[状态错误] {exc}', flush=True)
+    time.sleep(15)
