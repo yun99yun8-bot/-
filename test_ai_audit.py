@@ -7,7 +7,7 @@ import threading
 import unittest
 
 tree=ast.parse(Path(__file__).with_name('app.py').read_text())
-funcs={'period_index','period_target_block','ai_audit_summary','_target_block_observed','_persist_ai_payload'}
+funcs={'period_index','period_target_block','ai_audit_summary','_target_block_observed','_persist_ai_payload','_timeline_runtime_row'}
 consts={'TAIL_ANCHOR_INDEX','TAIL_INTERVAL_PERIODS','TAIL_SEQUENCE'}
 nodes=[n for n in tree.body if (isinstance(n,ast.FunctionDef) and n.name in funcs)
        or (isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in consts for t in n.targets))]
@@ -17,6 +17,20 @@ exec(compile(ast.Module(body=nodes,type_ignores=[]),'<audit>','exec'),scope)
 
 
 class AIAuditTests(unittest.TestCase):
+    def test_chain_time_and_first_seen_explain_late_lock(self):
+        base=datetime(2026,9,25,14,56,tzinfo=timezone.utc)
+        row={'period_key':'2026-09-25:1377','state':'AI_LOCKED','groups_seen':17,
+             'g17_block_time':base,'block_time':base+timedelta(seconds=9),
+             'saved_locked_at':base+timedelta(seconds=10.31),
+             'lifecycle_trace':{'event_lock_attempt':{'at':(base+timedelta(seconds=4)).isoformat(),
+               'detail':{'source':'g17_publish_event','firstSeenAt':(base+timedelta(seconds=1.2)).isoformat()}}}}
+        timeline=scope['_timeline_runtime_row'](row)
+        self.assertEqual(timeline['g17ToTargetSeconds'],9)
+        self.assertEqual(timeline['g17FetchSeconds'],1.2)
+        self.assertEqual(timeline['g17ToLockAttemptSeconds'],4)
+        self.assertEqual(timeline['attemptToSavedSeconds'],6.31)
+        self.assertEqual(timeline['deltaSeconds'],1.31)
+
     def test_invalid_rows_cannot_be_counted_as_model_misses(self):
         target=scope['period_target_block']('2026-09-25',275)
         publication=datetime(2026,9,24,20,36,tzinfo=timezone.utc)

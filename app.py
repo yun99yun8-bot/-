@@ -66,7 +66,7 @@ _prediction_context = {'key': None, 'value': None}
 _prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.5.0-g17-and-version-timing-1'
+MODEL_VERSION = 'v9.5.1-g17-timeline-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -90,6 +90,7 @@ TRON_PRO_API_KEY = os.environ.get('TRON_PRO_API_KEY', '').strip()
 # chance to durably lock the already-available pre-result snapshot.
 _g17_event_queue = queue.Queue(maxsize=32)
 _g17_event_seen = set()
+_g17_first_seen = {}
 _g17_event_lock = threading.Lock()
 _g17_durable = set()
 _g17_durable_lock = threading.Lock()
@@ -250,11 +251,17 @@ def _reconstruct_period_groups_dbfirst(date_str, period, target20):
     """
     wanted=[int(target20)-(20-g) for g in range(1,21)]
     rows={}
-    try: rows.update(get_db_blocks(wanted))
-    except Exception: pass
     with _live_blocks_lock:
         for bn in wanted:
             if bn in _live_blocks: rows[bn]=dict(_live_blocks[bn])
+    # The live publisher has the complete G1..G17 snapshot in the common case.
+    # Do not put a PostgreSQL round trip on the critical locking path.
+    missing=[bn for bn in wanted[:17] if bn not in rows]
+    if missing:
+        try:
+            historical=get_db_blocks(missing)
+            for bn,row in historical.items(): rows.setdefault(bn,row)
+        except Exception: pass
     groups={}; key=f'{date_str}:{int(period):04d}'
     for g,bn in enumerate(wanted,1):
         row=rows.get(bn)
@@ -272,18 +279,22 @@ def _reconstruct_period_groups_dbfirst(date_str, period, target20):
 def _lock_g17_snapshot(date_str, period, target20, source):
     """Idempotently lock only when G1..G17 are present and G20 is not published."""
     key=f'{date_str}:{int(period):04d}'
-    if prediction_exists(key) is not None:
-        with _g17_durable_lock:
-            _g17_durable.add(key)
-        return True
+    with _g17_durable_lock:
+        if key in _g17_durable:return True
     groups=_reconstruct_period_groups_dbfirst(date_str,period,target20)
     if groups.get('20') or not all(str(i) in groups for i in range(1,18)):
         trace_period_lifecycle(date_str,period,target20,'event_lock_not_ready',groups,{'source':source})
         return False
-    trace_period_lifecycle(date_str,period,target20,'event_lock_attempt',groups,{'source':source},increment_attempt=True)
+    with _g17_event_lock:
+        first_seen=_g17_first_seen.get(key)
+    attempt_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+    # Save the prediction first: lifecycle telemetry is not allowed to consume
+    # the short interval between G17 and the result block.
     save_prediction_if_ready(date_str,period,groups,target20,force_backend=True)
     flush_pending_ai_predictions()
     ok=prediction_exists(key) is not None
+    trace_period_lifecycle(date_str,period,target20,'event_lock_attempt',groups,
+                           {'source':source,'firstSeenAt':first_seen},increment_attempt=True,event_at=attempt_at)
     trace_period_lifecycle(date_str,period,target20,'event_lock_success' if ok else 'event_lock_not_durable',groups,{'source':source})
     if ok:
         with _g17_durable_lock:
@@ -738,7 +749,11 @@ def publish_block_live(block):
             key=f'{ds}:{int(p):04d}'
             with _g17_event_lock:
                 fresh=key not in _g17_event_seen
-                if fresh: _g17_event_seen.add(key)
+                if fresh:
+                    _g17_event_seen.add(key)
+                    _g17_first_seen[key]=datetime.now(timezone.utc).isoformat(timespec='milliseconds')
+                    if len(_g17_first_seen)>100:
+                        _g17_first_seen.clear();_g17_first_seen[key]=datetime.now(timezone.utc).isoformat(timespec='milliseconds')
             if fresh:
                 try: _g17_event_queue.put_nowait((ds,int(p),int(target),key))
                 except queue.Full: pass
@@ -1312,12 +1327,12 @@ def _target_block_observed(target):
         return _live_latest_number is not None and _live_latest_number>=int(target)
 
 
-def trace_period_lifecycle(date_str, period, target, event, groups=None, detail=None, increment_attempt=False):
+def trace_period_lifecycle(date_str, period, target, event, groups=None, detail=None, increment_attempt=False,event_at=None):
     """Persist compact lifecycle diagnostics so Web can inspect the Worker process."""
     key=f'{date_str}:{int(period):04d}'
     groups=groups or {}
     present=sorted(int(x) for x in groups.keys() if str(x).isdigit())
-    now=datetime.now(CN_TZ).isoformat(timespec='milliseconds')
+    now=event_at or datetime.now(CN_TZ).isoformat(timespec='milliseconds')
     patch={str(event): {'at':now,'groups':present,'groupsSeen':len(present),
                         'latestLiveBlock':_live_latest_number,'target20':int(target)}}
     if detail is not None: patch[str(event)]['detail']=detail
@@ -3015,6 +3030,37 @@ def system_health():
         if conn is not None: db_release(conn)
 
 
+def _timeline_runtime_row(row):
+    """Compare wall-clock observations with original on-chain block timestamps."""
+    trace=row.get('lifecycle_trace') or {}
+    if isinstance(trace,str):
+        try: trace=json.loads(trace)
+        except (TypeError,ValueError): trace={}
+    def at(event):
+        stamp=(trace.get(event) or {}).get('at')
+        try: return datetime.fromisoformat(stamp) if stamp else None
+        except (TypeError,ValueError): return None
+    detail=(trace.get('event_lock_attempt') or {}).get('detail') or {}
+    try: first=datetime.fromisoformat(detail['firstSeenAt']) if detail.get('firstSeenAt') else None
+    except (TypeError,ValueError): first=None
+    g17=row.get('g17_block_time'); target=row.get('block_time')
+    attempt=at('event_lock_attempt') or at('lock_attempt')
+    locked=row.get('saved_locked_at')
+    def delta(later,earlier):
+        if not later or not earlier:return None
+        try:return round((later-earlier).total_seconds(),2)
+        except (TypeError,ValueError):return None
+    return {'period':row['period_key'],'state':row['state'],
+            'groupsSeen':row.get('groups_seen'),'lastError':row.get('last_error'),
+            'hasPrediction':locked is not None,
+            'g17ToTargetSeconds':delta(target,g17),
+            'g17FetchSeconds':delta(first,g17),
+            'g17ToLockAttemptSeconds':delta(attempt,g17),
+            'attemptToSavedSeconds':delta(locked,attempt),
+            'deltaSeconds':delta(locked,target),
+            'lockSource':detail.get('source')}
+
+
 @app.get('/api/ai-audit')
 def ai_audit():
     """On-demand evidence breakdown; never recalculates an old prediction."""
@@ -3038,21 +3084,18 @@ def ai_audit():
                            WHERE service_role='worker' ORDER BY updated_at DESC LIMIT 1""")
             worker=cur.fetchone()
             cur.execute("""SELECT r.period_key,r.state,r.groups_seen,r.last_error,
+                          r.lifecycle_trace,r.g17_ready_at,
+                          g17.block_time AS g17_block_time,
                           r.prediction_locked_at,b.block_time,p.locked_at AS saved_locked_at
                           FROM period_runtime r
                           LEFT JOIN tron_blocks b ON b.block_number=r.target_block
+                          LEFT JOIN tron_blocks g17 ON g17.block_number=r.target_block-3
                           LEFT JOIN ai_predictions p ON p.period_key=r.period_key
                           ORDER BY r.period_date DESC,r.period_no DESC LIMIT 8""")
             runtime=cur.fetchall()
         snapshot=stored['snapshot'] if stored else None
         if isinstance(snapshot,str):snapshot=json.loads(snapshot)
-        recent_runtime=[]
-        for row in runtime:
-            locked=row.get('saved_locked_at'); block=row.get('block_time')
-            recent_runtime.append({'period':row['period_key'],'state':row['state'],
-                'groupsSeen':row.get('groups_seen'),'lastError':row.get('last_error'),
-                'hasPrediction':locked is not None,
-                'deltaSeconds':round((locked-block).total_seconds(),2) if locked and block else None})
+        recent_runtime=[_timeline_runtime_row(row) for row in runtime]
         worker_version=worker.get('model_version') if worker else None
         worker_age=(datetime.now(timezone.utc)-worker['updated_at']).total_seconds() if worker and worker.get('updated_at') else None
         return jsonify({'ok':True,'currentModelVersion':MODEL_VERSION,

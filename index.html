@@ -127,7 +127,14 @@
         var distribution=function(counts){return Array.from({length:8},function(_,i){return '单'+i+':'+Number(counts[String(i)]||0);}).join('、');};
         var cohort=versions[current]||{},versionStatus=latest===current?'当前版本已保存预测':'最近保存的预测尚非当前版本';
         var recent=(a.recentRows||[]).slice(0,5).map(function(r){return r.period.slice(-4)+'期 '+(r.status==='verified'?'有效':(r.status==='notLockedBeforeBlock'?'迟到'+(r.deltaSeconds==null?'':Number(r.deltaSeconds).toFixed(1)+'秒'):'未计入:'+r.status));}).join('；');
-        var states=(data.recentRuntime||[]).slice(0,4).map(function(r){return r.period.slice(-4)+'期 '+r.state+(r.hasPrediction?' 已保存':' 无预测')+(r.deltaSeconds==null?'':' 锁定差'+Number(r.deltaSeconds).toFixed(1)+'秒');}).join('；');
+        var seconds=function(v){return v==null?'待记录':Number(v).toFixed(2)+'秒';};
+        var states=(data.recentRuntime||[]).slice(0,4).map(function(r){return r.period.slice(-4)+'期 '+r.state+(r.hasPrediction?' 已保存':' 无预测')+
+          '，第17组→目标间隔'+seconds(r.g17ToTargetSeconds)+
+          '，第17组发现耗时'+seconds(r.g17FetchSeconds)+
+          '，第17组→尝试锁定'+seconds(r.g17ToLockAttemptSeconds)+
+          '，尝试→写库'+seconds(r.attemptToSavedSeconds)+
+          '，锁定相对目标'+seconds(r.deltaSeconds)+
+          (r.lockSource?'，来源'+r.lockSource:'');}).join('；');
         box.textContent='最近'+Number(a.predictionRows||0)+'条预测：可验证'+Number(a.validSamples||0)+'条；'+
           '第一名 '+Number(v.top1Hits||0)+'/'+Number(v.verified||0)+'（'+pct(v.top1Rate)+'）；'+
           '前三 '+Number(v.top3Hits||0)+'/'+Number(v.verified||0)+'（'+pct(v.top3Rate)+'）；'+
