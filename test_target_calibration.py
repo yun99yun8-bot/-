@@ -27,6 +27,15 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(target('2026-09-24',1001),86522304)
         self.assertEqual(target('2026-09-24',1201)-target('2026-09-24',1200),18)
 
+    def test_backward_360_periods_repeat_the_confirmed_cycle(self):
+        target=scope['period_target_block']
+        # The confirmed 480->481 switch was 8->6 (+18 blocks), and the
+        # previous inferred 360-period switch must also advance by 18.
+        self.assertEqual(target('2026-09-24',121)-target('2026-09-24',120),18)
+        self.assertEqual(scope['tail_schedule']('2026-09-24',120)['tail'],0)
+        self.assertEqual(scope['tail_schedule']('2026-09-24',121)['tail'],8)
+        self.assertTrue(scope['tail_schedule']('2026-09-24',120)['estimated'])
+
     def test_next_period_keeps_zero_tail(self):
         target=scope['period_target_block']
         self.assertEqual(target('2026-09-25',276),86536600)

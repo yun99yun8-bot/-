@@ -67,8 +67,8 @@ _prediction_context = {'key': None, 'value': None}
 _prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v10.0-collector-practice-1'
-RESEARCH_VERSION = 'research-family-v2'
+MODEL_VERSION = 'v10.1-historical-backfill-1'
+RESEARCH_VERSION = 'research-family-v3'
 RESEARCH_ONLY_MODE = True
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
@@ -506,9 +506,6 @@ TAIL_SEQUENCE = (6, 4, 2, 0, 8)
 def tail_schedule(date_str, period):
     """Average six-hour phase; estimates are explicitly separate from observations."""
     idx = period_index(date_str, period)
-    if idx < TAIL_ANCHOR_INDEX:
-        return {'tail': 8, 'phaseStart': None, 'nextSwitch': _tail_boundary(TAIL_ANCHOR_INDEX),
-                'estimated': idx != period_index('2026-09-24', 480), 'intervalPeriods': TAIL_INTERVAL_PERIODS}
     phase = (idx - TAIL_ANCHOR_INDEX) // TAIL_INTERVAL_PERIODS
     start = TAIL_ANCHOR_INDEX + phase * TAIL_INTERVAL_PERIODS
     return {'tail': TAIL_SEQUENCE[phase % len(TAIL_SEQUENCE)],
@@ -531,8 +528,6 @@ def period_target_block(date_str, period):
     transitions. Confirmed sample anchors are tested separately below.
     """
     idx = period_index(date_str, int(period))
-    if idx < TAIL_ANCHOR_INDEX:
-        return 86511888 + (idx - period_index('2026-09-24', 480)) * 20
     switches = (idx - TAIL_ANCHOR_INDEX) // TAIL_INTERVAL_PERIODS
     return 86511906 + (idx - TAIL_ANCHOR_INDEX) * 20 - 2 * switches
 
@@ -691,6 +686,18 @@ def init_db():
                     predictions JSONB NOT NULL, hashes_complete BOOLEAN NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     PRIMARY KEY(research_version,period_key))""")
+                cur.execute("""CREATE TABLE IF NOT EXISTS backfill_runtime (
+                    singleton SMALLINT PRIMARY KEY CHECK(singleton=1),
+                    start_index BIGINT NOT NULL,end_index BIGINT NOT NULL,
+                    next_index BIGINT NOT NULL,already_present INTEGER NOT NULL DEFAULT 0,
+                    fetched_periods INTEGER NOT NULL DEFAULT 0,failed_periods INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'scanning',last_error TEXT,
+                    revision BIGINT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+                cur.execute("""CREATE TABLE IF NOT EXISTS backfill_failures (
+                    period_index BIGINT PRIMARY KEY,reason TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 1,
+                    last_attempt TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
                 cur.execute("""CREATE TABLE IF NOT EXISTS research_selection (
                     singleton SMALLINT PRIMARY KEY CHECK(singleton=1),
                     research_version TEXT NOT NULL,

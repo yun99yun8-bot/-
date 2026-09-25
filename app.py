@@ -7,6 +7,7 @@ from datetime import datetime,timezone
 os.environ['RUN_EMBEDDED_WORKERS']='0'
 from flask import Flask,Response,jsonify,request
 import collector_core as core
+import backfill
 
 ROOT=Path(__file__).resolve().parent
 app=Flask(__name__)
@@ -105,6 +106,8 @@ def research_report():
         with conn.cursor(cursor_factory=core.RealDictCursor) as cur:
             cur.execute('SELECT report,research_version,updated_at FROM research_replay_runtime WHERE singleton=1')
             stored=cur.fetchone()
+            cur.execute('SELECT * FROM backfill_runtime WHERE singleton=1')
+            progress=cur.fetchone()
             cur.execute("""SELECT candidate,research_method,COUNT(*) AS valid,
                 COUNT(*) FILTER (WHERE prediction=actual_single) AS hits,
                 MIN(period_key) AS first_period,MAX(period_key) AS last_period
@@ -128,8 +131,22 @@ def research_report():
         report=stored['report'] if stored and stored['research_version']==core.RESEARCH_VERSION else {}
         if isinstance(report,str):report=json.loads(report)
         n=int(both['periods'] or 0)
+        progress_data=None
+        if progress:
+            start=int(progress['start_index']);end=int(progress['end_index'])
+            scanned=max(0,min(end-start+1,int(progress['next_index'])-start))
+            progress_data={'status':progress['status'],'targetPeriods':end-start+1,
+                'scannedPeriods':scanned,'alreadyPresent':int(progress['already_present']),
+                'fetchedPeriods':int(progress['fetched_periods']),
+                'failedPeriods':int(progress['failed_periods']),
+                'startPeriod':'%s:%04d'%backfill.period_from_index(start),
+                'endPeriod':'%s:%04d'%backfill.period_from_index(end),
+                'estimatedMappingPeriods':max(0,min(end+1,core.TAIL_ANCHOR_INDEX)-start),
+                'lastError':progress['last_error'],
+                'updatedAt':progress['updated_at'].isoformat()}
         return jsonify({'ok':True,'version':core.MODEL_VERSION,'researchVersion':core.RESEARCH_VERSION,
             'practice':report,'practiceUpdatedAt':stored['updated_at'].isoformat() if report else None,
+            'backfill':progress_data,
             'futureTrials':[{'slot':r['candidate'],'method':r['research_method'],
                 'valid':int(r['valid']),'hits':int(r['hits']),
                 'rate':round(100*r['hits']/r['valid'],2),'firstPeriod':r['first_period'],

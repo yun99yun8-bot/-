@@ -146,9 +146,11 @@ def history_pages(after):
 
 def _persist(practice, status):
     report=practice.report(status)
+    if status in ('catching_up','backfilling'):
+        report['topTwo']=[]
     snapshot=(practice.snapshot() if practice.last_key!=practice.saved_at
               or status!=practice.saved_status else None)
-    if snapshot and status=='catching_up':
+    if snapshot and status in ('catching_up','backfilling'):
         # Do not trial a winner selected from only a fraction of the archive.
         snapshot['replayTopTwo']=[]
     conn=core.db_connect(retries=0)
@@ -180,27 +182,50 @@ def _save_practice_rows(rows):
             with conn.cursor() as cur:
                 execute_values(cur,"""INSERT INTO research_practice_results
                     (research_version,period_key,trained_through,actual_single,predictions,hashes_complete)
-                    VALUES %s ON CONFLICT(research_version,period_key) DO NOTHING""",
+                    VALUES %s ON CONFLICT(research_version,period_key) DO UPDATE SET
+                    trained_through=EXCLUDED.trained_through,
+                    actual_single=EXCLUDED.actual_single,
+                    predictions=EXCLUDED.predictions,
+                    hashes_complete=EXCLUDED.hashes_complete""",
                     [(core.RESEARCH_VERSION,r['period'],r['trainedThrough'],r['actual'],
                       json.dumps(r['predictions']),r['completePreResultGroups']) for r in rows])
     finally:core.db_release(conn)
 
 
 def practice_worker():
-    time.sleep(8)  # let collection and official writer initialize first
+    time.sleep(30)  # allow collection and the backfill checkpoint to initialize
+    import backfill
     state=Practice()
     last_save=time.monotonic()
     pending=[]
+    known_revision=None
+    backfill_info=None
+    checked_at=0
     while True:
         core.worker_touch('practice')
         try:
+            if time.monotonic()-checked_at>8:
+                backfill_info=backfill.read_status()
+                checked_at=time.monotonic()
+                if backfill_info:
+                    rev=int(backfill_info['revision'])
+                    if known_revision is None:known_revision=rev
+                    elif (rev!=known_revision and backfill_info['status']=='complete'):
+                        # Recompute chronological history when earlier blocks
+                        # have been restored. Retrospective rows are revised,
+                        # genuine future trials remain immutable.
+                        if pending:_save_practice_rows(pending);pending=[]
+                        state=Practice();last_save=0
+                        known_revision=rev
             if pending:
                 _save_practice_rows(pending)
                 pending=[]
             rows=history_pages(state.last_key or '')
             if not rows:
                 if time.monotonic()-last_save>20:
-                    _persist(state,'following_new_periods');last_save=time.monotonic()
+                    active=backfill_info and backfill_info['status']!='complete'
+                    _persist(state,'backfilling' if active else 'following_new_periods')
+                    last_save=time.monotonic()
                 time.sleep(4);continue
             period=None;groups={};header=None
             def finish():
@@ -233,7 +258,9 @@ def practice_worker():
                 pending=[]
             count=len({row['period_key'] for row in rows})
             if time.monotonic()-last_save>5 or count<PAGE:
-                _persist(state,'catching_up' if count==PAGE else 'following_new_periods')
+                active=backfill_info and backfill_info['status']!='complete'
+                label='backfilling' if active else ('catching_up' if count==PAGE else 'following_new_periods')
+                _persist(state,label)
                 last_save=time.monotonic()
             # Avoid a long-held read transaction or a tight scan on a small DB.
             time.sleep(2 if deferred else .25)
@@ -243,15 +270,23 @@ def practice_worker():
 
 
 def live_trial_worker():
+    import backfill
     early=None;after_g17=None
+    def ready_snapshot(key):
+        snapshot=core.get_hash_model_snapshot(key)
+        if snapshot and snapshot.get('researchVersion')!=core.RESEARCH_VERSION:
+            return None
+        state=backfill.read_status()
+        if snapshot and (not state or state['status']!='complete'):
+            return {**snapshot,'replayTopTwo':[]}
+        return snapshot
     while True:
         core.worker_touch('trial')
         try:
             ds,p,_,_=core.current_period();key=f'{ds}:{int(p):04d}'
             target=core.period_target_block(ds,p)
             if early!=key:
-                snapshot=core.get_hash_model_snapshot(key)
-                if snapshot and snapshot.get('researchVersion')!=core.RESEARCH_VERSION:snapshot=None
+                snapshot=ready_snapshot(key)
                 history=core.get_historical_official_singles(ds,p,limit=30)
                 if core.save_research_forecasts(ds,p,target,history,snapshot):early=key
             if after_g17!=key:
@@ -260,8 +295,7 @@ def live_trial_worker():
                 if g17_ready and not core._target_block_observed(target):
                     groups=core._reconstruct_period_groups_dbfirst(ds,p,target)
                     if all(str(i) in groups for i in range(1,18)):
-                        snap=core.get_hash_model_snapshot(key)
-                        if snap and snap.get('researchVersion')!=core.RESEARCH_VERSION:snap=None
+                        snap=ready_snapshot(key)
                         history=core.get_historical_official_singles(ds,p,limit=30)
                         if core.save_research_forecasts(ds,p,target,history,snap,groups):
                             after_g17=key
