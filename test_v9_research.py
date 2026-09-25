@@ -15,7 +15,7 @@ source = ast.parse(Path(__file__).with_name('app.py').read_text())
 names = {'_norm_scores', '_candidate_rank', 'research_model_performance',
          '_hash_context_scores', '_relation_scores', 'v9_research_ensemble',
          'should_poll_target', 'outside_candidate', 'enqueue_block_for_db',
-         '_g20_prepublication_barrier'}
+         'target_result_fast_worker'}
 module = ast.Module(body=[n for n in source.body if isinstance(n, ast.FunctionDef)
                           and n.name in names], type_ignores=[])
 scope = {'json': json, 'RealDictCursor': object(), 'hash_research': hash_research,
@@ -78,11 +78,14 @@ class ResearchTests(unittest.TestCase):
         scope['enqueue_block_for_db']({'number':100,'block':'b'},official=True)
         self.assertEqual(scope['_result_db_write_queue'].get_nowait()['number'],100)
 
-    def test_durable_g17_does_not_block_group20_publication(self):
-        scope['_g17_durable_lock']=threading.Lock()
-        scope['_g17_durable']={'2026-09-25:0275'}
-        scope['_lock_g17_snapshot']=lambda *_:self.fail('already locked period must skip DB barrier')
-        self.assertTrue(scope['_g20_prepublication_barrier']('2026-09-25',275,100))
+    def test_result_watcher_never_creates_prediction_after_fetching_target(self):
+        worker=next(n for n in source.body if isinstance(n,ast.FunctionDef)
+                    and n.name=='target_result_fast_worker')
+        called={n.func.id for n in ast.walk(worker) if isinstance(n,ast.Call)
+                and isinstance(n.func,ast.Name)}
+        self.assertNotIn('_lock_g17_snapshot',called)
+        self.assertNotIn('save_prediction_if_ready',called)
+        self.assertNotIn('_g20_prepublication_barrier',called)
 
     def test_no_evidence_uses_labelled_exploratory_weights(self):
         scope['db_connect'] = lambda: None

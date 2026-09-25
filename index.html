@@ -122,10 +122,12 @@
     var xhr=new XMLHttpRequest();xhr.open('GET','/api/ai-audit?limit=1000&t='+Date.now(),true);xhr.timeout=12000;
     xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;
       if(xhr.status<200||xhr.status>=300){box.textContent='诊断暂不可用，请检查数据库连接。';return;}
-      try{var data=JSON.parse(xhr.responseText),a=data.audit||{},w=a.windows||{},v=w['1000']||{},c=a.invalidReasons||{},h=a.hashModel||{},late=a.lateLockSeconds||{},pred=a.predictedCounts||{},actual=a.actualCounts||{},versions=a.modelVersions||{},current=data.currentModelVersion||'未知',latest=a.latestSavedVersion||'无';
+      try{var data=JSON.parse(xhr.responseText),a=data.audit||{},w=a.windows||{},v=w['1000']||{},c=a.invalidReasons||{},h=a.hashModel||{},late=a.lateLockSeconds||{},pred=a.predictedCounts||{},actual=a.actualCounts||{},versions=a.modelVersions||{},current=data.currentModelVersion||'未知',latest=a.latestSavedVersion||'无',newStats=a.currentVersionStats||{};
         var pct=function(x){return x==null?'--':Number(x).toFixed(1)+'%';};
         var distribution=function(counts){return Array.from({length:8},function(_,i){return '单'+i+':'+Number(counts[String(i)]||0);}).join('、');};
-        var cohort=versions[current]||{},versionStatus=latest===current?'当前版本已有有效记录':'最近保存的预测尚非当前版本';
+        var cohort=versions[current]||{},versionStatus=latest===current?'当前版本已保存预测':'最近保存的预测尚非当前版本';
+        var recent=(a.recentRows||[]).slice(0,5).map(function(r){return r.period.slice(-4)+'期 '+(r.status==='verified'?'有效':(r.status==='notLockedBeforeBlock'?'迟到'+(r.deltaSeconds==null?'':Number(r.deltaSeconds).toFixed(1)+'秒'):'未计入:'+r.status));}).join('；');
+        var states=(data.recentRuntime||[]).slice(0,4).map(function(r){return r.period.slice(-4)+'期 '+r.state+(r.hasPrediction?' 已保存':' 无预测')+(r.deltaSeconds==null?'':' 锁定差'+Number(r.deltaSeconds).toFixed(1)+'秒');}).join('；');
         box.textContent='最近'+Number(a.predictionRows||0)+'条预测：可验证'+Number(a.validSamples||0)+'条；'+
           '第一名 '+Number(v.top1Hits||0)+'/'+Number(v.verified||0)+'（'+pct(v.top1Rate)+'）；'+
           '前三 '+Number(v.top3Hits||0)+'/'+Number(v.verified||0)+'（'+pct(v.top3Rate)+'）；'+
@@ -134,7 +136,9 @@
           '、锁定晚于区块'+Number(c.notLockedBeforeBlock||0)+(late.count?'（延迟中位数'+Number(late.median).toFixed(1)+'秒）':'')+'、未验证'+Number(c.notVerified||0)+
           '、结果不一致'+Number(c.actualMismatch||0)+'。'+
           '哈希模型完整期'+Number(h.sample||0)+'、留出'+Number(h.testSample||0)+'期、'+(h.active?'已通过验证并启用':'未通过验证/未启用')+'。'+
-          '当前程序版本：'+current+'；最近保存版本：'+latest+'（'+versionStatus+'），当前版本有效'+Number(cohort.verified||0)+'期、第一名命中'+Number(cohort.top1Hits||0)+'期。'+
+          '当前程序版本：'+current+'；后台Worker版本：'+(data.workerModelVersion||'无心跳')+'（最近心跳'+(data.workerAgeSeconds==null?'未知':Number(data.workerAgeSeconds).toFixed(0)+'秒前')+'）；最近保存版本：'+latest+'（'+versionStatus+'）。'+
+          '当前版本保存'+Number(newStats.saved||0)+'期、有效'+Number(newStats.verified||0)+'期、迟到'+Number(newStats.late||0)+'期、其他未计入'+Number(newStats.otherInvalid||0)+'期；当前版本有效记录第一名命中'+Number(cohort.top1Hits||0)+'期。'+
+          '最近记录：'+(recent||'暂无')+'。最近运行状态：'+(states||'暂无')+'。'+
           '有效期预测分布：'+distribution(pred)+'；实际分布：'+distribution(actual)+'。'+
           '本页仅核对程序保存的数据，平台开奖结果仍需按同一期号对照。';
       }catch(e){box.textContent='诊断返回数据解析失败。';}

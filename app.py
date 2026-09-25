@@ -66,7 +66,7 @@ _prediction_context = {'key': None, 'value': None}
 _prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.4.9-pre-result-lock-fastpath-1'
+MODEL_VERSION = 'v9.5.0-g17-and-version-timing-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -93,7 +93,7 @@ _g17_event_seen = set()
 _g17_event_lock = threading.Lock()
 _g17_durable = set()
 _g17_durable_lock = threading.Lock()
-_barrier_diag = {'g17Events': 0, 'g17Locks': 0, 'g20Barriers': 0, 'g20BarrierLocks': 0, 'last': None}
+_barrier_diag = {'g17Events': 0, 'g17Locks': 0, 'last': None}
 _barrier_diag_lock = threading.Lock()
 
 def _tron_rate_wait():
@@ -312,30 +312,41 @@ def g17_event_worker():
             _g17_event_queue.task_done()
 
 
-def _g20_prepublication_barrier(date_str, period, target20):
-    """Before G20 becomes visible, reconstruct G1..G17 from DB/RAM and lock.
-    Never performs network backfill and never creates a prediction after G20 publication.
-    """
-    key=f'{date_str}:{int(period):04d}'
-    with _g17_durable_lock:
-        if key in _g17_durable:
-            return True
-    with _barrier_diag_lock:
-        _barrier_diag['g20Barriers'] += 1
-    ok=False
-    try:
-        ok=_lock_g17_snapshot(date_str,period,target20,'g20_prepublication_barrier')
-    except Exception as exc:
-        worker_touch('target-result-fast',f'g20 barrier: {exc}')
-    with _barrier_diag_lock:
-        if ok: _barrier_diag['g20BarrierLocks'] += 1
-        _barrier_diag['last']={'event':'g20_barrier','periodKey':key,'ok':bool(ok)}
-    return ok
-
-
 def should_poll_target(latest_live, target, countdown):
     """Resume direct target lookup at G17 or in the final 12 seconds."""
     return (latest_live is not None and int(latest_live)>=int(target)-3) or int(countdown)<=12
+
+
+def g17_fast_worker():
+    """Watch the last pre-result input even when ordinary block ingestion lags."""
+    last_target=None; attempts=0
+    while True:
+        worker_touch('g17-fast')
+        try:
+            ds,p,_,_=current_period(); target=period_target_block(ds,p)
+            if target!=last_target:
+                last_target=target; attempts=0
+            g17=target-3
+            with _live_blocks_lock:
+                seen=g17 in _live_blocks
+                latest=_live_latest_number
+            countdown=calibrated_countdown_value()
+            if (not seen and attempts<4 and countdown>5
+                    and not _target_block_observed(target)
+                    and ((latest is not None and latest>=target-4) or countdown<=16)):
+                attempts+=1
+                try:
+                    block,provider,latency_ms,_=fetch_block_fast(g17)
+                    publish_block_live(block)
+                    enqueue_block_for_db(block)
+                    with _barrier_diag_lock:
+                        _barrier_diag['g17FastProvider']=provider
+                        _barrier_diag['g17FastLatencyMs']=latency_ms
+                except Exception as exc:
+                    worker_touch('g17-fast',exc)
+        except Exception as exc:
+            worker_touch('g17-fast',exc)
+        time.sleep(1.7)
 
 
 def target_result_fast_worker():
@@ -365,17 +376,14 @@ def target_result_fast_worker():
                     continue
                 try:
                     block, provider, latency_ms, errors = fetch_block_fast(target)
-                    # G20 barrier: while the result is still private to this thread,
-                    # use only RAM/PostgreSQL to durably lock any complete G17 snapshot.
-                    barrier_start=time.perf_counter()
-                    _g20_prepublication_barrier(date_str, period, target)
-                    barrier_ms=round((time.perf_counter()-barrier_start)*1000,1)
+                    # The target already exists on-chain. Never create a new
+                    # prediction here, even if this process has not published it.
                     publish_block_live(block)
                     with _fast_diag_lock:
                         _fast_diag.update({
                             'target': target, 'provider': provider,
                             'firstSeenAt': datetime.now(CN_TZ).isoformat(timespec='milliseconds'),
-                            'latencyMs': latency_ms, 'barrierMs': barrier_ms,
+                            'latencyMs': latency_ms, 'barrierMs': 0,
                             'blockTime': block.get('timestamp'), 'errors': errors
                         })
                     enqueue_block_for_db(block,official=True)
@@ -1404,7 +1412,8 @@ def _start_managed_worker(name, target):
 def supervisor_worker():
     """Restart workers that exit. Heartbeats expose blocked workers for diagnosis."""
     targets={'db-writer':db_writer_worker,'result-db-writer':result_db_writer_worker,'tron-ingest':tron_ingest_worker,
-             'target-result-fast':target_result_fast_worker,'g17-event':g17_event_worker,'ai-prediction':ai_prediction_worker,
+             'target-result-fast':target_result_fast_worker,'g17-fast':g17_fast_worker,
+             'g17-event':g17_event_worker,'ai-prediction':ai_prediction_worker,
              'smart-db':smart_db_worker,'period-engine':autonomous_period_worker,
              'hash-research':hash_research_worker,'prediction-context':prediction_context_worker}
     while True:
@@ -1567,6 +1576,7 @@ def start_worker_once():
         _start_managed_worker('result-db-writer',result_db_writer_worker)
         _start_managed_worker('tron-ingest',tron_ingest_worker)
         _start_managed_worker('target-result-fast',target_result_fast_worker)
+        _start_managed_worker('g17-fast',g17_fast_worker)
         _start_managed_worker('g17-event',g17_event_worker)
         _start_managed_worker('ai-prediction',ai_prediction_worker)
         _start_managed_worker('smart-db',smart_db_worker)
@@ -2464,7 +2474,7 @@ def historical_prediction_verified(prediction, block, target):
         return False
 
 
-def ai_audit_summary(rows, snapshot=None):
+def ai_audit_summary(rows, snapshot=None, current_version=None):
     """Audit locked predictions against chain rows without rewriting history.
 
     The platform's own result is independent evidence; matching our expected
@@ -2472,10 +2482,13 @@ def ai_audit_summary(rows, snapshot=None):
     """
     reasons={'targetMismatch':0,'blockMissing':0,'notLockedBeforeBlock':0,
              'notVerified':0,'actualMismatch':0}
-    samples=[]; issues=[]; late_seconds=[]
+    samples=[]; issues=[]; late_seconds=[]; recent_rows=[]; version_counts={}
     for r in rows:
         ds=r['period_date'].isoformat() if hasattr(r['period_date'],'isoformat') else str(r['period_date'])
         p=int(r['period_no']); key=str(r.get('period_key') or f'{ds}:{p:04d}')
+        version=str(r.get('model_version') or '未标记版本')
+        bucket=version_counts.setdefault(version,{'saved':0,'verified':0,'late':0,'otherInvalid':0})
+        bucket['saved']+=1
         expected=period_target_block(ds,p)
         reason=None
         if int(r['target_block'])!=expected:reason='targetMismatch'
@@ -2486,12 +2499,19 @@ def ai_audit_summary(rows, snapshot=None):
         elif int(r['actual_single'])!=int(r['chain_single']):reason='actualMismatch'
         if reason:
             reasons[reason]+=1
+            bucket['late' if reason=='notLockedBeforeBlock' else 'otherInvalid']+=1
             if reason=='notLockedBeforeBlock' and r.get('locked_at') and r.get('block_time'):
                 late_seconds.append((r['locked_at']-r['block_time']).total_seconds())
             if len(issues)<12:
                 issues.append({'period':key,'reason':reason,'savedTarget':int(r['target_block']),
                                'expectedTarget':expected})
-            continue
+        else:
+            bucket['verified']+=1
+        if len(recent_rows)<12:
+            locked=r.get('locked_at'); published=r.get('block_time')
+            recent_rows.append({'period':key,'version':version,'status':reason or 'verified',
+                'deltaSeconds':round((locked-published).total_seconds(),2) if locked and published else None})
+        if reason:continue
         top=r.get('prediction_top3') or []
         if isinstance(top,str):
             try:top=json.loads(top)
@@ -2523,6 +2543,8 @@ def ai_audit_summary(rows, snapshot=None):
     snap=snapshot if isinstance(snapshot,dict) else {}
     late_seconds.sort()
     return {'predictionRows':len(rows),'validSamples':len(samples),
+            'currentVersionStats':version_counts.get(current_version,{'saved':0,'verified':0,'late':0,'otherInvalid':0}),
+            'recentRows':recent_rows,
             'lateLockSeconds':{'count':len(late_seconds),
                 'median':round(late_seconds[len(late_seconds)//2],2) if late_seconds else None,
                 'min':round(late_seconds[0],2) if late_seconds else None,
@@ -3012,10 +3034,31 @@ def ai_audit():
             rows=cur.fetchall()
             cur.execute("SELECT snapshot FROM hash_model_runtime WHERE singleton=1")
             stored=cur.fetchone()
+            cur.execute("""SELECT model_version,updated_at FROM service_heartbeats
+                           WHERE service_role='worker' ORDER BY updated_at DESC LIMIT 1""")
+            worker=cur.fetchone()
+            cur.execute("""SELECT r.period_key,r.state,r.groups_seen,r.last_error,
+                          r.prediction_locked_at,b.block_time,p.locked_at AS saved_locked_at
+                          FROM period_runtime r
+                          LEFT JOIN tron_blocks b ON b.block_number=r.target_block
+                          LEFT JOIN ai_predictions p ON p.period_key=r.period_key
+                          ORDER BY r.period_date DESC,r.period_no DESC LIMIT 8""")
+            runtime=cur.fetchall()
         snapshot=stored['snapshot'] if stored else None
         if isinstance(snapshot,str):snapshot=json.loads(snapshot)
+        recent_runtime=[]
+        for row in runtime:
+            locked=row.get('saved_locked_at'); block=row.get('block_time')
+            recent_runtime.append({'period':row['period_key'],'state':row['state'],
+                'groupsSeen':row.get('groups_seen'),'lastError':row.get('last_error'),
+                'hasPrediction':locked is not None,
+                'deltaSeconds':round((locked-block).total_seconds(),2) if locked and block else None})
+        worker_version=worker.get('model_version') if worker else None
+        worker_age=(datetime.now(timezone.utc)-worker['updated_at']).total_seconds() if worker and worker.get('updated_at') else None
         return jsonify({'ok':True,'currentModelVersion':MODEL_VERSION,
-                        'audit':ai_audit_summary(rows,snapshot)})
+                        'workerModelVersion':worker_version,'workerAgeSeconds':round(worker_age,1) if worker_age is not None else None,
+                        'recentRuntime':recent_runtime,
+                        'audit':ai_audit_summary(rows,snapshot,MODEL_VERSION)})
     except Exception as exc:
         return jsonify({'ok':False,'error':type(exc).__name__,'message':str(exc)[:140]}),503
     finally:
