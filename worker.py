@@ -1,63 +1,66 @@
-"""V10.6.3 — one job only: reset -> download 200k raw blocks -> rebuild 10k periods.
-No live/new block collection runs in this version. Latest data will be caught up later.
-"""
+"""v8god 0.0.5 collector worker — collection/catch-up/repair only. AI training lives in ai_worker.py."""
 import os, signal, socket, threading, time
 import collector_core as core
 import backfill
 
-DATASET_ID='V10.6.3_HISTORY_ONLY_RAW200K_THEN_REBUILD_20260926'
+VERSION='v8god 0.0.5-three-service'
 if not core.DATABASE_URL: raise SystemExit('DATABASE_URL is required')
 if not core.init_db(): raise SystemExit('Database initialization failed')
-
-def reset_database_once():
-    conn=core.db_connect(retries=0)
-    if conn is None: raise RuntimeError('database unavailable during reset')
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("""CREATE TABLE IF NOT EXISTS dataset_runtime(
-                    singleton SMALLINT PRIMARY KEY CHECK(singleton=1), dataset_id TEXT NOT NULL,
-                    reset_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
-                cur.execute('SELECT dataset_id FROM dataset_runtime WHERE singleton=1 FOR UPDATE')
-                row=cur.fetchone()
-                if row and row[0]==DATASET_ID: return False
-                tables=['historical_raw_blocks','tron_blocks','period_groups','raw_backfill_runtime','backfill_runtime',
-                        'backfill_failures','omission_runtime','ai_predictions','hash_model_runtime','research_predictions',
-                        'research_replay_runtime','research_practice_results','research_selection','system_events',
-                        'period_runtime','service_heartbeats']
-                for table in tables:
-                    cur.execute(f'TRUNCATE TABLE {table} RESTART IDENTITY CASCADE')
-                cur.execute("""INSERT INTO dataset_runtime(singleton,dataset_id,reset_at) VALUES(1,%s,NOW())
-                    ON CONFLICT(singleton) DO UPDATE SET dataset_id=EXCLUDED.dataset_id,reset_at=NOW()""",(DATASET_ID,))
-        return True
-    finally: core.db_release(conn)
-
-did_reset=reset_database_once()
-print(f'[启动] V10.6.3 HISTORY ONLY | 数据库重置={did_reset}', flush=True)
-backfill._initialize()
-st=backfill.read_status(); raw=(st or {}).get('raw') or {}
-print(f"[锁定范围] {raw.get('start_block')} -> {raw.get('end_block')} | 目标={backfill.RAW_TARGET}组", flush=True)
-print('[规则] 第一阶段只抓原始 block_number/hash/timestamp；不抓新数据、不算号码、不回填', flush=True)
-
-threads={}; stopping=False
-
+print(f'[启动] {VERSION} collector | 保留现有数据库 | 禁止清库 | AI训练已拆分',flush=True)
+stopping=False; threads={}
 def stop(*_):
-    global stopping; stopping=True
-signal.signal(signal.SIGTERM,stop); signal.signal(signal.SIGINT,stop)
+ global stopping; stopping=True
+signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
 
-def start_thread(label,target):
-    t=threading.Thread(target=target,name=label,daemon=True); threads[label]=t; t.start()
+def completed_latest_index():
+ c=core.db_connect(retries=0)
+ try:
+  with c.cursor() as q:
+   q.execute("SELECT period_date,period_no FROM period_groups WHERE group_no=20 ORDER BY period_date DESC,period_no DESC LIMIT 1")
+   r=q.fetchone(); return core.period_index(str(r[0]),int(r[1])) if r else None
+ finally:core.db_release(c)
 
-start_thread('raw-200k',backfill.raw_download_worker)
-start_thread('rebuild-after-raw',backfill.backfill_worker)
-name=os.environ.get('WORKER_SERVICE_NAME','tron-monitor-worker'); instance=os.environ.get('RENDER_INSTANCE_ID') or socket.gethostname()
+def fetch_chain_period(idx):
+ ds,p=backfill.period_from_index(idx); target=core.period_target_block(ds,p)
+ rows=backfill._range_blocks(target-19,target+1,ignore_live_priority=True)
+ groups={}
+ for g,r in enumerate(rows,1):
+  nums=core.calc_numbers(r['block']); groups[str(g)]={'blockNumber':r['number'],'block':r['block'],'numbers':[f'{n:02d}' for n in nums],'singleCount':core.calc_single_count(nums)}
+ core.persist_period_groups(ds,p,groups,target)
+ return f'{ds}:{p:04d}'
+
+def catchup_live_worker():
+ print('[最新] 等待历史10000期回填完成',flush=True)
+ while not stopping:
+  try:
+   st=backfill.read_status()
+   if not st or st.get('status')!='complete': time.sleep(10);continue
+   ds,p,_,_=core.current_period(); latest_closed=core.period_index(ds,p)-1
+   have=completed_latest_index(); nxt=(have+1) if have is not None else latest_closed
+   if nxt<=latest_closed:
+    key=fetch_chain_period(nxt); core.rebuild_omission_runtime(); print(f'[最新] 已补齐 {key}',flush=True); time.sleep(.1)
+   else: time.sleep(2)
+  except Exception as e:
+   print('[最新错误]',type(e).__name__,str(e)[:220],flush=True);time.sleep(5)
+
+def start(name,target):
+ t=threading.Thread(target=target,name=name,daemon=True);threads[name]=(t,target);t.start()
+
+def repair_worker():
+ print('[修复] 数据完整性检查线程启动',flush=True)
+ while not stopping:
+  try:
+   st=backfill.read_status() or {}; raw=(st.get('raw') or {})
+   if raw.get('status')=='complete':
+    n=core.repair_calibrated_official_records(limit=10000); r=core.repair_recent_periods(limit=12); core.rebuild_omission_runtime()
+    print(f'[修复] 校准修复={n} 最近期修复={r} | 完成',flush=True)
+   time.sleep(300)
+  except Exception as e:
+   print('[修复错误]',type(e).__name__,str(e)[:220],flush=True);time.sleep(60)
+start('catchup-live',catchup_live_worker);start('repair',repair_worker)
+name=os.environ.get('WORKER_SERVICE_NAME','tron-monitor-worker');instance=os.environ.get('RENDER_INSTANCE_ID') or socket.gethostname()
 while not stopping:
-    for label,target in [('raw-200k',backfill.raw_download_worker),('rebuild-after-raw',backfill.backfill_worker)]:
-        if not threads[label].is_alive():
-            print(f'[线程重启] {label}', flush=True); start_thread(label,target)
-    core.persist_service_heartbeat(name,'worker',instance,'ONLINE',{'dataset':DATASET_ID,'runningEngines':[k for k,t in threads.items() if t.is_alive()]})
-    try:
-        st=backfill.read_status(); raw=(st or {}).get('raw') or {}
-        print(f"[状态] 原始={raw.get('stored_blocks',0)}/{backfill.RAW_TARGET} {raw.get('status')} | 360回填={(st or {}).get('status')} | 新数据=OFF", flush=True)
-    except Exception as exc: print(f'[状态错误] {exc}', flush=True)
-    time.sleep(15)
+ for label,(t,target) in list(threads.items()):
+  if not t.is_alive(): print('[线程重启]',label,flush=True);start(label,target)
+ core.persist_service_heartbeat(name,'collector',instance,'ONLINE',{'version':VERSION,'runningEngines':[k for k,(t,_) in threads.items() if t.is_alive()]})
+ time.sleep(15)

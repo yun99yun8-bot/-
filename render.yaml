@@ -18,3 +18,16 @@ services:
     envVars:
       - key: DATABASE_URL
         sync: false
+      - key: WORKER_SERVICE_NAME
+        value: tron-monitor-worker
+
+  - type: worker
+    name: tron-monitor-ai-worker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python ai_worker.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: AI_WORKER_SERVICE_NAME
+        value: tron-monitor-ai-worker
