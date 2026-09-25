@@ -2,6 +2,8 @@
 import ast
 import json
 import math
+import queue
+import threading
 import unittest
 from pathlib import Path
 import hash_research
@@ -12,10 +14,12 @@ import hash_research
 source = ast.parse(Path(__file__).with_name('app.py').read_text())
 names = {'_norm_scores', '_candidate_rank', 'research_model_performance',
          '_hash_context_scores', '_relation_scores', 'v9_research_ensemble',
-         'should_poll_target', 'outside_candidate'}
+         'should_poll_target', 'outside_candidate', 'enqueue_block_for_db',
+         '_g20_prepublication_barrier'}
 module = ast.Module(body=[n for n in source.body if isinstance(n, ast.FunctionDef)
                           and n.name in names], type_ignores=[])
-scope = {'json': json, 'RealDictCursor': object(), 'hash_research': hash_research}
+scope = {'json': json, 'RealDictCursor': object(), 'hash_research': hash_research,
+         'queue': queue}
 exec(compile(module, '<research>', 'exec'), scope)
 
 
@@ -61,6 +65,24 @@ class ResearchTests(unittest.TestCase):
         self.assertTrue(should_poll(97,100,42))
         self.assertTrue(should_poll(None,100,12))
         self.assertFalse(should_poll(None,100,13))
+
+    def test_group20_uses_independent_priority_writer_queue(self):
+        scope['_result_db_write_queue']=queue.Queue()
+        scope['_db_write_queue']=queue.Queue()
+        scope['current_period']=lambda:('2026-09-25',275,'0275','2609250275')
+        scope['period_target_block']=lambda *_:100
+        scope['enqueue_block_for_db']({'number':99,'block':'a'})
+        scope['enqueue_block_for_db']({'number':100,'block':'b'})
+        self.assertEqual(scope['_db_write_queue'].get_nowait()['number'],99)
+        self.assertEqual(scope['_result_db_write_queue'].get_nowait()['number'],100)
+        scope['enqueue_block_for_db']({'number':100,'block':'b'},official=True)
+        self.assertEqual(scope['_result_db_write_queue'].get_nowait()['number'],100)
+
+    def test_durable_g17_does_not_block_group20_publication(self):
+        scope['_g17_durable_lock']=threading.Lock()
+        scope['_g17_durable']={'2026-09-25:0275'}
+        scope['_lock_g17_snapshot']=lambda *_:self.fail('already locked period must skip DB barrier')
+        self.assertTrue(scope['_g20_prepublication_barrier']('2026-09-25',275,100))
 
     def test_no_evidence_uses_labelled_exploratory_weights(self):
         scope['db_connect'] = lambda: None

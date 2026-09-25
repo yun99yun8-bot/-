@@ -451,7 +451,7 @@
   var fastBusy=false;
   function loadFastResult(){
     if(fastBusy)return; fastBusy=true;
-    var x=new XMLHttpRequest(); activeFastXHR=x; x.open('GET','/api/result-fast?t='+Date.now(),true); x.timeout=3500;
+    var x=new XMLHttpRequest(); activeFastXHR=x; x.open('GET','/api/result-fast?previous='+(fixedResult?'0':'1')+'&t='+Date.now(),true); x.timeout=3500;
     function done(){if(activeFastXHR===x)activeFastXHR=null;fastBusy=false;}
     x.onreadystatechange=function(){if(x.readyState!==4)return; done(); if(x.status<200||x.status>=300)return;
       try{var d=JSON.parse(x.responseText); lastFastSuccess=Date.now(); if(!d||!d.ready)return;

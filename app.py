@@ -46,6 +46,7 @@ _draw_cache_lock = threading.Lock()
 _live_blocks = {}
 _live_blocks_lock = threading.Lock()
 _db_write_queue = queue.Queue(maxsize=1000)
+_result_db_write_queue = queue.Queue(maxsize=32)
 _live_latest_number = None
 _relation_cache = {'key': None, 'at': 0, 'value': None}
 _relation_cache_lock = threading.Lock()
@@ -63,7 +64,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.4.3-result-record-recalibration-1'
+MODEL_VERSION = 'v9.4.4-priority-result-path-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -88,6 +89,8 @@ TRON_PRO_API_KEY = os.environ.get('TRON_PRO_API_KEY', '').strip()
 _g17_event_queue = queue.Queue(maxsize=32)
 _g17_event_seen = set()
 _g17_event_lock = threading.Lock()
+_g17_durable = set()
+_g17_durable_lock = threading.Lock()
 _barrier_diag = {'g17Events': 0, 'g17Locks': 0, 'g20Barriers': 0, 'g20BarrierLocks': 0, 'last': None}
 _barrier_diag_lock = threading.Lock()
 
@@ -267,7 +270,10 @@ def _reconstruct_period_groups_dbfirst(date_str, period, target20):
 def _lock_g17_snapshot(date_str, period, target20, source):
     """Idempotently lock only when G1..G17 are present and G20 is not published."""
     key=f'{date_str}:{int(period):04d}'
-    if prediction_exists(key) is not None: return True
+    if prediction_exists(key) is not None:
+        with _g17_durable_lock:
+            _g17_durable.add(key)
+        return True
     groups=_reconstruct_period_groups_dbfirst(date_str,period,target20)
     if groups.get('20') or not all(str(i) in groups for i in range(1,18)):
         trace_period_lifecycle(date_str,period,target20,'event_lock_not_ready',groups,{'source':source})
@@ -278,7 +284,12 @@ def _lock_g17_snapshot(date_str, period, target20, source):
     flush_pending_ai_predictions()
     ok=prediction_exists(key) is not None
     trace_period_lifecycle(date_str,period,target20,'event_lock_success' if ok else 'event_lock_not_durable',groups,{'source':source})
-    if ok: set_period_runtime(date_str,period,target20,'AI_LOCKED',len(groups))
+    if ok:
+        with _g17_durable_lock:
+            _g17_durable.add(key)
+            if len(_g17_durable)>100:
+                _g17_durable.clear(); _g17_durable.add(key)
+        set_period_runtime(date_str,period,target20,'AI_LOCKED',len(groups))
     return ok
 
 
@@ -305,6 +316,9 @@ def _g20_prepublication_barrier(date_str, period, target20):
     Never performs network backfill and never creates a prediction after G20 publication.
     """
     key=f'{date_str}:{int(period):04d}'
+    with _g17_durable_lock:
+        if key in _g17_durable:
+            return True
     with _barrier_diag_lock:
         _barrier_diag['g20Barriers'] += 1
     ok=False
@@ -338,7 +352,8 @@ def target_result_fast_worker():
                 last_target = target
                 with _fast_diag_lock:
                     _fast_diag.update({'target': target, 'provider': None, 'firstSeenAt': None,
-                                       'latencyMs': None, 'barrierMs': None, 'errors': {}})
+                                       'latencyMs': None, 'barrierMs': None,
+                                       'dbSavedAt': None, 'dbDelayMs': None, 'errors': {}})
             if not ready:
                 with _live_blocks_lock:
                     latest_live=_live_latest_number
@@ -355,7 +370,6 @@ def target_result_fast_worker():
                     _g20_prepublication_barrier(date_str, period, target)
                     barrier_ms=round((time.perf_counter()-barrier_start)*1000,1)
                     publish_block_live(block)
-                    enqueue_block_for_db(block)
                     with _fast_diag_lock:
                         _fast_diag.update({
                             'target': target, 'provider': provider,
@@ -363,6 +377,7 @@ def target_result_fast_worker():
                             'latencyMs': latency_ms, 'barrierMs': barrier_ms,
                             'blockTime': block.get('timestamp'), 'errors': errors
                         })
+                    enqueue_block_for_db(block,official=True)
                 except Exception as exc:
                     with _fast_diag_lock:
                         _fast_diag['errors'] = {'last': str(exc)[:300]}
@@ -748,11 +763,53 @@ def persist_block_to_db(block):
     finally:
         db_release(conn)
 
-def enqueue_block_for_db(block):
+def enqueue_block_for_db(block, official=False):
+    """Give G20 its own writer so routine group backfill cannot queue ahead."""
+    if not official:
+        try:
+            ds,p,_,_=current_period()
+            official=int(block['number'])==period_target_block(ds,p)
+        except Exception:
+            official=False
+    if official:
+        try:
+            _result_db_write_queue.put_nowait(dict(block))
+            return
+        except queue.Full:
+            pass
     try:
         _db_write_queue.put_nowait(dict(block))
     except queue.Full:
         pass
+
+
+def result_db_writer_worker():
+    """Persist official blocks independently of the 1..19 group write queue."""
+    while True:
+        worker_touch('result-db-writer')
+        block=_result_db_write_queue.get()
+        saved=False
+        try:
+            for delay in (0,0.35,1,2):
+                if delay:time.sleep(delay)
+                try:
+                    persist_block_to_db(block)
+                    saved=True
+                    with _fast_diag_lock:
+                        if int(block['number'])==_fast_diag.get('target'):
+                            now=datetime.now(CN_TZ)
+                            seen=_fast_diag.get('firstSeenAt')
+                            _fast_diag['dbSavedAt']=now.isoformat(timespec='milliseconds')
+                            if seen:
+                                _fast_diag['dbDelayMs']=round((now-datetime.fromisoformat(seen)).total_seconds()*1000,1)
+                    break
+                except Exception as exc:
+                    worker_touch('result-db-writer',exc)
+            if not saved:
+                try:_db_write_queue.put_nowait(block)
+                except queue.Full:pass
+        finally:
+            _result_db_write_queue.task_done()
 
 def db_writer_worker():
     """Database writes are deliberately off the realtime result path."""
@@ -1341,7 +1398,7 @@ def _start_managed_worker(name, target):
 
 def supervisor_worker():
     """Restart workers that exit. Heartbeats expose blocked workers for diagnosis."""
-    targets={'db-writer':db_writer_worker,'tron-ingest':tron_ingest_worker,
+    targets={'db-writer':db_writer_worker,'result-db-writer':result_db_writer_worker,'tron-ingest':tron_ingest_worker,
              'target-result-fast':target_result_fast_worker,'g17-event':g17_event_worker,'ai-prediction':ai_prediction_worker,
              'smart-db':smart_db_worker,'period-engine':autonomous_period_worker,
              'hash-research':hash_research_worker}
@@ -1483,6 +1540,7 @@ def start_worker_once():
             return
         _worker_started = True
         _start_managed_worker('db-writer',db_writer_worker)
+        _start_managed_worker('result-db-writer',result_db_writer_worker)
         _start_managed_worker('tron-ingest',tron_ingest_worker)
         _start_managed_worker('target-result-fast',target_result_fast_worker)
         _start_managed_worker('g17-event',g17_event_worker)
@@ -2733,8 +2791,10 @@ def result_fast():
         except Exception:
             row=None
     if not row:
-        try: previous=previous_official_result(ds,p)
-        except Exception: previous=None
+        previous=None
+        if request.args.get('previous','1')!='0':
+            try: previous=previous_official_result(ds,p)
+            except Exception: previous=None
         if previous:
             return jsonify({'ready':True,'period':str(previous['platformPeriod'])[-4:],
                             'platformPeriod':previous['platformPeriod'],
@@ -2752,7 +2812,8 @@ def result_fast():
     single=calc_single_count(nums)
     return jsonify({'ready':True,'period':ps,'platformPeriod':platform,'targetBlock':target,
                     'blockHash':row.get('block',row.get('block_hash')),
-                    'numbers':nums,'single':single,'singleText':f'单{single}'})
+                    'numbers':nums,'single':single,'singleText':f'单{single}',
+                    'blockTime':row['block_time'].isoformat() if row.get('block_time') and hasattr(row['block_time'],'isoformat') else row.get('timestamp')})
 
 
 @app.get('/api/system-health')

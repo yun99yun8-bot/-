@@ -36,12 +36,16 @@ while not _stop:
         local_err=dict(core._runtime_health.get('workerErrors') or {})
         last_ai=core._runtime_health.get('lastAiError')
         last_db=core._runtime_health.get('lastDbError')
+    with core._fast_diag_lock:
+        fast_target=dict(core._fast_diag)
     detail={
         'uptimeSeconds': int(now-_started),
         'engineHeartbeats': local_hb,
         'engineErrors': local_err,
         'lastAiError': last_ai,
         'lastDbError': last_db,
+        'fastTarget': fast_target,
+        'resultWriterBacklog': core._result_db_write_queue.qsize(),
         'workerRestarts': dict(core._worker_restarts),
     }
     ok=core.persist_service_heartbeat(SERVICE_NAME,'worker',INSTANCE_ID,'ONLINE',detail)
