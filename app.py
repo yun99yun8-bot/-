@@ -64,7 +64,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.4.4-priority-result-path-1'
+MODEL_VERSION = 'v9.4.6-ai-evidence-audit-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -2413,6 +2413,60 @@ def historical_prediction_verified(prediction, block, target):
         return False
 
 
+def ai_audit_summary(rows, snapshot=None):
+    """Audit locked predictions against chain rows without rewriting history.
+
+    The platform's own result is independent evidence; matching our expected
+    target only proves internal consistency, not platform alignment.
+    """
+    reasons={'targetMismatch':0,'blockMissing':0,'notLockedBeforeBlock':0,
+             'notVerified':0,'actualMismatch':0}
+    samples=[]; issues=[]
+    for r in rows:
+        ds=r['period_date'].isoformat() if hasattr(r['period_date'],'isoformat') else str(r['period_date'])
+        p=int(r['period_no']); key=str(r.get('period_key') or f'{ds}:{p:04d}')
+        expected=period_target_block(ds,p)
+        reason=None
+        if int(r['target_block'])!=expected:reason='targetMismatch'
+        elif r.get('block_number') is None:reason='blockMissing'
+        elif not r.get('locked_at') or not r.get('block_time') or r['locked_at']>=r['block_time']:
+            reason='notLockedBeforeBlock'
+        elif r.get('actual_single') is None:reason='notVerified'
+        elif int(r['actual_single'])!=int(r['chain_single']):reason='actualMismatch'
+        if reason:
+            reasons[reason]+=1
+            if len(issues)<12:
+                issues.append({'period':key,'reason':reason,'savedTarget':int(r['target_block']),
+                               'expectedTarget':expected})
+            continue
+        top=r.get('prediction_top3') or []
+        if isinstance(top,str):
+            try:top=json.loads(top)
+            except (TypeError,ValueError):top=[]
+        try:top=[int(x) for x in top][:3]
+        except (TypeError,ValueError):top=[]
+        actual=int(r['chain_single'])
+        samples.append({'period':key,'targetBlock':expected,'top1':int(r['ai_analysis']),
+                        'top3':top,'actual':actual})
+    windows={}
+    for n in (20,100,500,1000):
+        recent=samples[:n]
+        size=len(recent)
+        top1=sum(x['top1']==x['actual'] for x in recent)
+        top3=sum(x['actual'] in x['top3'] for x in recent)
+        baseline=sum(x['actual']==3 for x in recent)
+        windows[str(n)]={'verified':size,'top1Hits':top1,'top3Hits':top3,
+                         'baseline3Hits':baseline,
+                         'top1Rate':round(top1/size*100,2) if size else None,
+                         'top3Rate':round(top3/size*100,2) if size else None}
+    snap=snapshot if isinstance(snapshot,dict) else {}
+    return {'predictionRows':len(rows),'validSamples':len(samples),
+            'invalidReasons':reasons,'windows':windows,'examples':issues,
+            'hashModel':{k:snap.get(k) for k in ('status','sample','trainSample','tuneSample',
+                'testSample','active','alpha','baselineLoss','modelLoss','baselineTop1','modelTop1','trainedThrough')},
+            'platformAlignment':'未核对平台原始开奖；本诊断仅核对区块与已存预测'}
+
+
 def prediction_summary(date_str, period, groups, target20, official, ui_countdown=None):
     key=f'{date_str}:{int(period):04d}'
     now=time.time()
@@ -2871,6 +2925,34 @@ def system_health():
         return jsonify({'ok':False,'error':type(exc).__name__,'message':str(exc)[:200],'runtime':dict(_runtime_health)}),503
     finally:
         if conn is not None: db_release(conn)
+
+
+@app.get('/api/ai-audit')
+def ai_audit():
+    """On-demand evidence breakdown; never recalculates an old prediction."""
+    limit=request.args.get('limit',1000,type=int)
+    if limit not in (100,500,1000):limit=1000
+    conn=None
+    try:
+        conn=db_connect(retries=0)
+        if conn is None:
+            return jsonify({'ok':False,'error':'数据库暂不可用'}),503
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT p.period_key,p.period_date,p.period_no,p.target_block,
+                          p.ai_analysis,p.prediction_top3,p.actual_single,p.locked_at,
+                          b.block_number,b.block_time,b.single_count AS chain_single
+                          FROM ai_predictions p LEFT JOIN tron_blocks b ON b.block_number=p.target_block
+                          ORDER BY p.period_date DESC,p.period_no DESC LIMIT %s""",(limit,))
+            rows=cur.fetchall()
+            cur.execute("SELECT snapshot FROM hash_model_runtime WHERE singleton=1")
+            stored=cur.fetchone()
+        snapshot=stored['snapshot'] if stored else None
+        if isinstance(snapshot,str):snapshot=json.loads(snapshot)
+        return jsonify({'ok':True,'audit':ai_audit_summary(rows,snapshot)})
+    except Exception as exc:
+        return jsonify({'ok':False,'error':type(exc).__name__,'message':str(exc)[:140]}),503
+    finally:
+        if conn is not None:db_release(conn)
 
 
 @app.get('/api/db-check')
