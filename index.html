@@ -122,7 +122,7 @@
     var xhr=new XMLHttpRequest();xhr.open('GET','/api/ai-audit?limit=1000&t='+Date.now(),true);xhr.timeout=12000;
     xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;
       if(xhr.status<200||xhr.status>=300){box.textContent='诊断暂不可用，请检查数据库连接。';return;}
-      try{var data=JSON.parse(xhr.responseText),a=data.audit||{},w=a.windows||{},v=w['1000']||{},c=a.invalidReasons||{},h=a.hashModel||{},pred=a.predictedCounts||{},actual=a.actualCounts||{},versions=a.modelVersions||{},current=data.currentModelVersion||'未知',latest=a.latestSavedVersion||'无';
+      try{var data=JSON.parse(xhr.responseText),a=data.audit||{},w=a.windows||{},v=w['1000']||{},c=a.invalidReasons||{},h=a.hashModel||{},late=a.lateLockSeconds||{},pred=a.predictedCounts||{},actual=a.actualCounts||{},versions=a.modelVersions||{},current=data.currentModelVersion||'未知',latest=a.latestSavedVersion||'无';
         var pct=function(x){return x==null?'--':Number(x).toFixed(1)+'%';};
         var distribution=function(counts){return Array.from({length:8},function(_,i){return '单'+i+':'+Number(counts[String(i)]||0);}).join('、');};
         var cohort=versions[current]||{},versionStatus=latest===current?'当前版本已有有效记录':'最近保存的预测尚非当前版本';
@@ -131,7 +131,7 @@
           '前三 '+Number(v.top3Hits||0)+'/'+Number(v.verified||0)+'（'+pct(v.top3Rate)+'）；'+
           '单3固定基准 '+Number(v.baseline3Hits||0)+'/'+Number(v.verified||0)+'。'+
           '未计入：旧目标区块'+Number(c.targetMismatch||0)+'、无原始区块'+Number(c.blockMissing||0)+
-          '、锁定晚于区块'+Number(c.notLockedBeforeBlock||0)+'、未验证'+Number(c.notVerified||0)+
+          '、锁定晚于区块'+Number(c.notLockedBeforeBlock||0)+(late.count?'（延迟中位数'+Number(late.median).toFixed(1)+'秒）':'')+'、未验证'+Number(c.notVerified||0)+
           '、结果不一致'+Number(c.actualMismatch||0)+'。'+
           '哈希模型完整期'+Number(h.sample||0)+'、留出'+Number(h.testSample||0)+'期、'+(h.active?'已通过验证并启用':'未通过验证/未启用')+'。'+
           '当前程序版本：'+current+'；最近保存版本：'+latest+'（'+versionStatus+'），当前版本有效'+Number(cohort.verified||0)+'期、第一名命中'+Number(cohort.top1Hits||0)+'期。'+

@@ -3,14 +3,16 @@ import ast
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
+import threading
 import unittest
 
 tree=ast.parse(Path(__file__).with_name('app.py').read_text())
-funcs={'period_index','period_target_block','ai_audit_summary'}
+funcs={'period_index','period_target_block','ai_audit_summary','_target_block_observed','_persist_ai_payload'}
 consts={'TAIL_ANCHOR_INDEX','TAIL_INTERVAL_PERIODS','TAIL_SEQUENCE'}
 nodes=[n for n in tree.body if (isinstance(n,ast.FunctionDef) and n.name in funcs)
        or (isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id in consts for t in n.targets))]
-scope={'datetime':datetime,'json':json}
+scope={'datetime':datetime,'json':json,'_live_blocks_lock':threading.Lock(),
+       'MODEL_VERSION':'v9.4.9-test'}
 exec(compile(ast.Module(body=nodes,type_ignores=[]),'<audit>','exec'),scope)
 
 
@@ -41,12 +43,49 @@ class AIAuditTests(unittest.TestCase):
         self.assertEqual(result['invalidReasons']['targetMismatch'],1)
         self.assertEqual(result['invalidReasons']['blockMissing'],1)
         self.assertEqual(result['invalidReasons']['notLockedBeforeBlock'],1)
+        self.assertEqual(result['lateLockSeconds']['median'],1.0)
         self.assertEqual(result['hashModel']['sample'],650)
         self.assertEqual(result['actualCounts']['3'],2)
         self.assertEqual(result['predictedCounts']['3'],1)
         self.assertEqual(result['predictedCounts']['4'],1)
         self.assertEqual(result['modelVersions'][row['model_version']],{'verified':2,'top1Hits':1})
         self.assertEqual(result['latestSavedVersion'],row['model_version'])
+
+    def test_result_height_is_hard_deadline_for_snapshot(self):
+        observed=scope['_target_block_observed']
+        scope['_live_latest_number']=100
+        self.assertFalse(observed(101))
+        self.assertTrue(observed(100))
+        self.assertTrue(observed(99))
+        scope['db_connect']=lambda: self.fail('late lock must not reach the database')
+        with self.assertRaisesRegex(RuntimeError,'already observed'):
+            scope['_persist_ai_payload']({'target20':100})
+
+    def test_db_insert_rejects_result_that_arrived_between_height_check_and_write(self):
+        class Cursor:
+            rowcount=0
+            query=''
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def execute(self,query,params):
+                self.query=query
+                self.params=params
+        class Connection:
+            def __init__(self): self.cur=Cursor()
+            def __enter__(self): return self
+            def __exit__(self,*_): pass
+            def cursor(self): return self.cur
+        db=Connection()
+        scope['_live_latest_number']=99
+        scope['db_connect']=lambda: db
+        scope['db_release']=lambda _:None
+        payload={'key':'2026-09-25:0275','date':'2026-09-25','period':275,
+                 'target20':100,'dataConclusion':3,'ai':3,'top3':[3,4,2],
+                 'sampleSize':17,'ensemble':{},'c17':3,'c17Mode':'居中倾向'}
+        with self.assertRaisesRegex(RuntimeError,'already stored'):
+            scope['_persist_ai_payload'](payload)
+        self.assertIn('WHERE NOT EXISTS (SELECT 1 FROM tron_blocks WHERE block_number=%s)',db.cur.query)
+        self.assertEqual(db.cur.params[-1],100)
 
 
 if __name__=='__main__':unittest.main()

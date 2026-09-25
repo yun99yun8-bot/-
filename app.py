@@ -62,9 +62,11 @@ _ai_summary_cache = {'key': None, 'at': 0, 'value': None}
 _ai_summary_cache_lock = threading.Lock()
 _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
+_prediction_context = {'key': None, 'value': None}
+_prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.4.8-audit-prediction-distribution-1'
+MODEL_VERSION = 'v9.4.9-pre-result-lock-fastpath-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -279,7 +281,6 @@ def _lock_g17_snapshot(date_str, period, target20, source):
         trace_period_lifecycle(date_str,period,target20,'event_lock_not_ready',groups,{'source':source})
         return False
     trace_period_lifecycle(date_str,period,target20,'event_lock_attempt',groups,{'source':source},increment_attempt=True)
-    save_conclusion17_if_ready(date_str,period,groups,target20)
     save_prediction_if_ready(date_str,period,groups,target20,force_backend=True)
     flush_pending_ai_predictions()
     ok=prediction_exists(key) is not None
@@ -1298,6 +1299,11 @@ def prediction_exists(period_key):
         if conn is not None:db_release(conn)
 
 
+def _target_block_observed(target):
+    with _live_blocks_lock:
+        return _live_latest_number is not None and _live_latest_number>=int(target)
+
+
 def trace_period_lifecycle(date_str, period, target, event, groups=None, detail=None, increment_attempt=False):
     """Persist compact lifecycle diagnostics so Web can inspect the Worker process."""
     key=f'{date_str}:{int(period):04d}'
@@ -1369,7 +1375,6 @@ def autonomous_period_worker():
                 try:
                     trace_period_lifecycle(ds,p,target,'lock_attempt',groups,increment_attempt=True)
                     set_period_runtime(ds,p,target,'AI_LOCK_ATTEMPT',seen)
-                    save_conclusion17_if_ready(ds,p,groups,target)
                     result=save_prediction_if_ready(ds,p,groups,target,force_backend=True)
                     flush_pending_ai_predictions()
                     row=prediction_exists(key)
@@ -1401,7 +1406,7 @@ def supervisor_worker():
     targets={'db-writer':db_writer_worker,'result-db-writer':result_db_writer_worker,'tron-ingest':tron_ingest_worker,
              'target-result-fast':target_result_fast_worker,'g17-event':g17_event_worker,'ai-prediction':ai_prediction_worker,
              'smart-db':smart_db_worker,'period-engine':autonomous_period_worker,
-             'hash-research':hash_research_worker}
+             'hash-research':hash_research_worker,'prediction-context':prediction_context_worker}
     while True:
         worker_touch('supervisor')
         for name,target in targets.items():
@@ -1454,6 +1459,27 @@ def get_hash_model_snapshot(current_key):
         return None
     finally:
         if conn is not None:db_release(conn)
+
+
+def prediction_context_worker():
+    """Prepare DB-heavy prior-period evidence before the G17 deadline."""
+    while True:
+        worker_touch('prediction-context')
+        try:
+            ds,p,_,_=current_period(); key=f'{ds}:{int(p):04d}'
+            with _prediction_context_lock:
+                ready=_prediction_context['key']==key and _prediction_context['value'] is not None
+            if not ready:
+                historical=get_historical_official_singles(ds,p)
+                relation=group20_relation_model(ds,p)
+                performance=research_model_performance(500)
+                snapshot=get_hash_model_snapshot(key)
+                with _prediction_context_lock:
+                    _prediction_context.update({'key':key,'value':{'historical':historical,
+                        'relation':relation,'performance':performance,'hashSnapshot':snapshot}})
+        except Exception as exc:
+            worker_touch('prediction-context',exc)
+        time.sleep(2.0)
 
 
 def hash_research_worker():
@@ -1509,8 +1535,6 @@ def ai_prediction_worker():
             groups,target20=collect_groups_live(date_str,period)
             official=groups.get('20'); key=f'{date_str}:{int(period):04d}'
             if not official and all(str(i) in groups for i in range(1,18)):
-                try: save_conclusion17_if_ready(date_str,period,groups,target20)
-                except Exception: pass
                 try: save_prediction_if_ready(date_str,period,groups,target20,force_backend=True)
                 except Exception: pass
             if official and last_verified_key != key:
@@ -1549,6 +1573,7 @@ def start_worker_once():
         _start_managed_worker('period-engine',autonomous_period_worker)
         _start_managed_worker('omission-engine',omission_engine_worker)
         _start_managed_worker('hash-research',hash_research_worker)
+        _start_managed_worker('prediction-context',prediction_context_worker)
         _start_managed_worker('supervisor',supervisor_worker)
 
 
@@ -2049,6 +2074,8 @@ def calibrated_countdown_value():
 
 
 def _persist_ai_payload(payload):
+    if _target_block_observed(payload['target20']):
+        raise RuntimeError('target block already observed; refuse late prediction')
     conn=db_connect()
     if conn is None:
         raise RuntimeError('database unavailable')
@@ -2057,7 +2084,8 @@ def _persist_ai_payload(payload):
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO ai_predictions(period_key,period_date,period_no,target_block,data_conclusion,ai_analysis,prediction_top3,sample_size,conclusion17,conclusion17_mode,model_version,locked_at,confidence,ensemble_detail,model_weights)
-                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s,%s::jsonb,%s::jsonb)
+                    SELECT %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s,%s::jsonb,%s::jsonb
+                    WHERE NOT EXISTS (SELECT 1 FROM tron_blocks WHERE block_number=%s)
                     ON CONFLICT(period_key) DO UPDATE SET
                       data_conclusion=COALESCE(ai_predictions.data_conclusion,EXCLUDED.data_conclusion),
                       ai_analysis=COALESCE(ai_predictions.ai_analysis,EXCLUDED.ai_analysis),
@@ -2069,22 +2097,25 @@ def _persist_ai_payload(payload):
                      payload['dataConclusion'],payload['ai'],json.dumps(payload['top3']),
                      payload['sampleSize'],payload.get('c17'),payload.get('c17Mode'),MODEL_VERSION,
                          payload.get('confidence'),json.dumps(payload.get('ensemble') or {}),
-                         json.dumps((payload.get('ensemble') or {}).get('weights') or {})))
+                         json.dumps((payload.get('ensemble') or {}).get('weights') or {}),
+                         int(payload['target20'])))
+                if cur.rowcount == 0:
+                    raise RuntimeError('target block already stored; refuse late prediction')
     finally:
         db_release(conn)
     return True
 
 
 def flush_pending_ai_predictions():
-    """Retry pre-result snapshots even after group20 appears.
-
-    The prediction itself was captured before the result; only persistence is
-    retried. This prevents a transient DB/pool failure in the ~9 second window
-    from permanently losing the period.
-    """
+    """Retry only while the target block has not been observed."""
     with _pending_ai_lock:
         items=list(_pending_ai_predictions.items())
     for key,payload in items:
+        if _target_block_observed(payload['target20']):
+            with _pending_ai_lock:
+                _pending_ai_predictions.pop(key,None)
+            record_system_event('ai_missed_deadline',key,{'targetBlock':payload['target20']})
+            continue
         try:
             _persist_ai_payload(payload)
             with _pending_ai_lock:
@@ -2221,7 +2252,7 @@ def _relation_scores(groups, relation):
             score[int(row['singleCount'])]+=max(0.0,rate)*3.0
     return _norm_scores(score)
 
-def v9_research_ensemble(groups, historical, relation=None, hash_snapshot=None):
+def v9_research_ensemble(groups, historical, relation=None, hash_snapshot=None, performance=None):
     """V9 leakage-safe adaptive ensemble.
 
     `historical` is newest -> oldest. Candidate weights are learned only from
@@ -2270,7 +2301,7 @@ def v9_research_ensemble(groups, historical, relation=None, hash_snapshot=None):
     learned_scores=hash_research.snapshot_scores(hash_snapshot,groups)
     if learned_scores is not None: parts['hash_learned']=learned_scores
 
-    perf=research_model_performance(500)
+    perf=performance if performance is not None else research_model_performance(500)
     # Explicitly exploratory prior: use current, pre-result information even
     # before enough verified periods exist. These are fixed design weights,
     # NOT evidence that any component can predict future hashes.
@@ -2340,6 +2371,8 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
     # Formal autonomous locks require the complete strict 17-group input.
     if force_backend and not all(str(i) in groups for i in range(1,18)):
         return None
+    if _target_block_observed(target20):
+        return None
     stats=stats_from_groups(groups)
     if int(stats.get('sampleSize') or 0) < 1:
         return None
@@ -2350,14 +2383,19 @@ def save_prediction_if_ready(date_str, period, groups, target20, ui_countdown=No
         return {'single':None,'scores':{},'historicalSample':0,'frozen':True,
                 'period':int(period),'lockCountdown':countdown,'lockSource':'existing'}
 
-    historical=get_historical_official_singles(date_str,period)
+    with _prediction_context_lock:
+        context=(_prediction_context['value'] if _prediction_context['key']==key else None)
+    if context is None:
+        # Never do several historical PostgreSQL scans within the ~9s G17 window.
+        # The context worker will finish and the live worker will retry.
+        return None
+    historical=context['historical']
     c17=ai_conclusion17_from_data(groups,historical,date_str,period,target20)
 
     # The production prediction is the V9 rolling out-of-sample research ensemble.  It uses only data
     # available before group20.  Do this before any nonessential analytics.
-    relation_pre=group20_relation_model(date_str, period)
-    hash_snapshot=get_hash_model_snapshot(key)
-    v7=v9_research_ensemble(groups,historical,relation_pre,hash_snapshot)
+    v7=v9_research_ensemble(groups,historical,context['relation'],
+                            context['hashSnapshot'],performance=context['performance'])
     ai=int(v7['single'])
     top3=[int(x) for x in v7['top3']]
     highest=stats.get('highest') or []
@@ -2434,7 +2472,7 @@ def ai_audit_summary(rows, snapshot=None):
     """
     reasons={'targetMismatch':0,'blockMissing':0,'notLockedBeforeBlock':0,
              'notVerified':0,'actualMismatch':0}
-    samples=[]; issues=[]
+    samples=[]; issues=[]; late_seconds=[]
     for r in rows:
         ds=r['period_date'].isoformat() if hasattr(r['period_date'],'isoformat') else str(r['period_date'])
         p=int(r['period_no']); key=str(r.get('period_key') or f'{ds}:{p:04d}')
@@ -2448,6 +2486,8 @@ def ai_audit_summary(rows, snapshot=None):
         elif int(r['actual_single'])!=int(r['chain_single']):reason='actualMismatch'
         if reason:
             reasons[reason]+=1
+            if reason=='notLockedBeforeBlock' and r.get('locked_at') and r.get('block_time'):
+                late_seconds.append((r['locked_at']-r['block_time']).total_seconds())
             if len(issues)<12:
                 issues.append({'period':key,'reason':reason,'savedTarget':int(r['target_block']),
                                'expectedTarget':expected})
@@ -2481,7 +2521,12 @@ def ai_audit_summary(rows, snapshot=None):
         bucket['verified']+=1
         bucket['top1Hits']+=int(x['top1']==x['actual'])
     snap=snapshot if isinstance(snapshot,dict) else {}
+    late_seconds.sort()
     return {'predictionRows':len(rows),'validSamples':len(samples),
+            'lateLockSeconds':{'count':len(late_seconds),
+                'median':round(late_seconds[len(late_seconds)//2],2) if late_seconds else None,
+                'min':round(late_seconds[0],2) if late_seconds else None,
+                'max':round(late_seconds[-1],2) if late_seconds else None},
             'actualCounts':actual_counts,'predictedCounts':predicted_counts,
             'modelVersions':versions,
             'latestSavedVersion':str(rows[0].get('model_version') or '未标记版本') if rows else None,
@@ -2784,10 +2829,6 @@ def draw():
         # This removes dependence on a daemon thread getting scheduled in the
         # short pre-result window.
         if ai17 and not official:
-            try:
-                save_conclusion17_if_ready(date_str, period, groups, target20)
-            except Exception:
-                pass
             try:
                 save_prediction_if_ready(date_str, period, groups, target20, force_backend=True)
             except Exception:
