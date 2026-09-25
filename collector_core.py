@@ -67,8 +67,8 @@ _prediction_context = {'key': None, 'value': None}
 _prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v10.1-historical-backfill-1'
-RESEARCH_VERSION = 'research-family-v3'
+MODEL_VERSION = 'v10.2-fast-raw-warehouse-old-only-training'
+RESEARCH_VERSION = 'research-family-v4-old-only'
 RESEARCH_ONLY_MODE = True
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
@@ -612,6 +612,17 @@ def init_db():
                     )
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_tron_blocks_fetched_at ON tron_blocks(fetched_at DESC)")
+                cur.execute("""CREATE TABLE IF NOT EXISTS historical_raw_blocks (
+                    block_number BIGINT PRIMARY KEY, block_hash TEXT NOT NULL,
+                    block_time TIMESTAMPTZ NOT NULL, numbers JSONB NOT NULL,
+                    single_count SMALLINT NOT NULL, fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_historical_raw_time ON historical_raw_blocks(block_time)")
+                cur.execute("""CREATE TABLE IF NOT EXISTS raw_backfill_runtime (
+                    singleton SMALLINT PRIMARY KEY CHECK(singleton=1),
+                    start_block BIGINT NOT NULL,end_block BIGINT NOT NULL,next_block BIGINT NOT NULL,
+                    stored_blocks INTEGER NOT NULL DEFAULT 0,failed_batches INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'downloading',last_error TEXT,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS ai_predictions (
                         period_key TEXT PRIMARY KEY,

@@ -4,7 +4,7 @@ import types
 import unittest
 
 sys.modules.setdefault('collector_core',types.ModuleType('collector_core'))
-sys.modules['collector_core'].RESEARCH_VERSION='research-family-v3'
+sys.modules['collector_core'].RESEARCH_VERSION='research-family-v4-old-only'
 import research_engine as engine
 
 

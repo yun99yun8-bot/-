@@ -97,11 +97,31 @@ class Practice:
         with self.lock:
             n=len(self.recent)
             recent_hits={name:sum(row.get(name,0) for row in self.recent) for name in METHODS}
-            ranking=[{'method':name,'hits':self.hits[name],'tested':self.tested,
+            ranking=[]
+            for name in METHODS:
+                windows={}
+                rows=list(self.recent)
+                for size in (50,100,300,1000):
+                    sample=rows[-size:];hits=sum(r.get(name,0) for r in sample)
+                    windows[str(size)]={'tested':len(sample),'hits':hits,
+                        'rate':round(100*hits/len(sample),2) if sample else None}
+                cur_hit=cur_miss=best_hit=best_miss=run_hit=run_miss=0
+                for row in rows:
+                    if row.get(name,0):run_hit+=1;run_miss=0;best_hit=max(best_hit,run_hit)
+                    else:run_miss+=1;run_hit=0;best_miss=max(best_miss,run_miss)
+                for row in reversed(rows):
+                    if row.get(name,0):
+                        if cur_miss:break
+                        cur_hit+=1
+                    else:
+                        if cur_hit:break
+                        cur_miss+=1
+                ranking.append({'method':name,'hits':self.hits[name],'tested':self.tested,
                       'rate':round(100*self.hits[name]/self.tested,2) if self.tested else None,
                       'recentHits':recent_hits[name],'recentTested':n,
-                      'recentRate':round(100*recent_hits[name]/n,2) if n else None}
-                     for name in METHODS]
+                      'recentRate':round(100*recent_hits[name]/n,2) if n else None,
+                      'windows':windows,'currentHitStreak':cur_hit,'currentMissStreak':cur_miss,
+                      'bestHitStreak1000':best_hit,'bestMissStreak1000':best_miss})
             ranking.sort(key=lambda r:(-r['recentHits'], -r['hits'],r['method']))
             return {'status':status if self.seen>=TRAIN else 'waiting_for_1000',
                     'trainingPeriods':min(self.seen,TRAIN),'historicalPeriodsRead':self.seen,
@@ -110,6 +130,9 @@ class Practice:
                     'replayFrom':self.first_replay,'replayThrough':self.last_key if self.tested else None,
                     'trainingWindow':TRAIN,'refitInterval':REFIT,'ranking':ranking,
                     'topTwo':[r['method'] for r in ranking[:2]] if self.tested>=200 else [],
+                    'evaluationMode':'historical_walk_forward_only',
+                    'labelPolicy':'each prediction is generated before that archived period result is added to training',
+                    'usesUnseenFutureResults':False,'liveTrialEnabled':False,
                     'recentPractice':list(reversed(self.last_rows)), 'lastProcessed':self.last_key}
 
     def snapshot(self):

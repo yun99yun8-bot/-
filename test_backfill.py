@@ -23,18 +23,19 @@ class BackfillTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 backfill._normalize({**raw,'blockID':'not a hash'})
 
-    def test_missing_chain_height_is_not_filled_with_guessed_hash(self):
+    def test_missing_raw_height_is_not_filled_with_guessed_hash(self):
         target=1000
-        chain={height:{'number':height,'block':'A'*64,
-               'numbers':['01']*7,'singleCount':7} for height in range(981,1000)}
+        warehouse={height:{'block_number':height,'block_hash':'A'*64,
+                   'numbers':['01']*7,'single_count':7} for height in range(981,1000)}
         with patch.object(backfill.core,'period_target_block',return_value=target,create=True),\
              patch.object(backfill,'_existing',return_value={}),\
-             patch.object(backfill.core,'get_db_blocks',return_value={},create=True),\
-             patch.object(backfill,'_range_blocks',return_value=chain),\
+             patch.object(backfill,'_warehouse_period',return_value=warehouse),\
+             patch.object(backfill,'_verified_row',return_value=True),\
              patch.object(backfill.core,'persist_period_groups',create=True) as write:
-            with self.assertRaisesRegex(RuntimeError,'missing chain height 1000'):
+            with self.assertRaisesRegex(RuntimeError,'raw warehouse missing block 1000'):
                 backfill.fetch_period(date_index())
             write.assert_not_called()
+
 
 
 def date_index():

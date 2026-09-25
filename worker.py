@@ -19,10 +19,9 @@ targets={
     'target-result-fast':core.target_result_fast_worker,
     'smart-db':core.smart_db_worker,
     'omission-engine':core.omission_engine_worker,
+    'raw-backfill':backfill.raw_download_worker,
     'backfill':backfill.backfill_worker,
     'practice':research_engine.practice_worker,
-    'trial':research_engine.live_trial_worker,
-    'trial-verify':research_engine.verify_worker,
 }
 threads={}
 stopping=False

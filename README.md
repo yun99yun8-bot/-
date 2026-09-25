@@ -1,3 +1,14 @@
+# V10.2 FAST RAW WAREHOUSE / OLD-ONLY TRAINING
+
+- Stage 1: bulk-download the historical TRON block span (about 200k blocks) in 100-block range calls into `historical_raw_blocks`.
+- Stage 2: rebuild about 10,000 periods locally from that permanent raw warehouse using the existing 360-period calibration rule.
+- Raw hashes are never guessed; incomplete ranges retry. Live collection keeps priority.
+- Training is historical-only chronological walk-forward: each archived prediction is generated from older observed records before that archived label is added.
+- Live/future trial workers are disabled in V10.2.
+- Training report adds 50/100/300/1000-period rates and hit/miss streak diagnostics.
+
+Existing V10.1 tables are migrated automatically by `init_db()`.
+
 # Torn V10.1：持续采集、旧区块补采、10000期历史练习
 
 ## 部署

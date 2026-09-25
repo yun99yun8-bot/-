@@ -108,6 +108,8 @@ def research_report():
             stored=cur.fetchone()
             cur.execute('SELECT * FROM backfill_runtime WHERE singleton=1')
             progress=cur.fetchone()
+            cur.execute('SELECT * FROM raw_backfill_runtime WHERE singleton=1')
+            raw_progress=cur.fetchone()
             cur.execute("""SELECT candidate,research_method,COUNT(*) AS valid,
                 COUNT(*) FILTER (WHERE prediction=actual_single) AS hits,
                 MIN(period_key) AS first_period,MAX(period_key) AS last_period
@@ -144,6 +146,13 @@ def research_report():
                 'estimatedMappingPeriods':max(0,min(end+1,core.TAIL_ANCHOR_INDEX)-start),
                 'lastError':progress['last_error'],
                 'updatedAt':progress['updated_at'].isoformat()}
+            if raw_progress:
+                total=max(0,int(raw_progress['end_block'])-int(raw_progress['start_block'])+1)
+                stored=int(raw_progress['stored_blocks'] or 0)
+                progress_data['rawWarehouse']={'status':raw_progress['status'],'startBlock':int(raw_progress['start_block']),
+                    'endBlock':int(raw_progress['end_block']),'targetBlocks':total,'storedBlocks':stored,
+                    'percent':round(100*stored/total,2) if total else 0,'failedBatches':int(raw_progress['failed_batches'] or 0),
+                    'lastError':raw_progress['last_error'],'updatedAt':raw_progress['updated_at'].isoformat()}
         return jsonify({'ok':True,'version':core.MODEL_VERSION,'researchVersion':core.RESEARCH_VERSION,
             'practice':report,'practiceUpdatedAt':stored['updated_at'].isoformat() if report else None,
             'backfill':progress_data,
