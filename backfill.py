@@ -54,24 +54,29 @@ def _initialize():
             with conn.cursor() as cur:
                 cur.execute("""INSERT INTO backfill_runtime
                     (singleton,start_index,end_index,next_index,status)
-                    VALUES(1,%s,%s,%s,'waiting_raw') ON CONFLICT(singleton) DO NOTHING""",
+                    VALUES(1,%s,%s,%s,'waiting_raw') ON CONFLICT(singleton) DO UPDATE SET
+                    start_index=EXCLUDED.start_index,end_index=EXCLUDED.end_index,
+                    next_index=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.next_index ELSE EXCLUDED.next_index END,
+                    status=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.status ELSE 'waiting_raw' END,
+                    already_present=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.already_present ELSE 0 END,
+                    fetched_periods=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.fetched_periods ELSE 0 END,
+                    failed_periods=CASE WHEN backfill_runtime.start_index=EXCLUDED.start_index AND backfill_runtime.end_index=EXCLUDED.end_index THEN backfill_runtime.failed_periods ELSE 0 END,last_error=NULL,updated_at=NOW()""",
                     (start,end,start))
                 cur.execute("""INSERT INTO raw_backfill_runtime
                     (singleton,start_block,end_block,next_block,status)
-                    VALUES(1,%s,%s,%s,'downloading') ON CONFLICT(singleton) DO NOTHING""",
+                    VALUES(1,%s,%s,%s,'downloading') ON CONFLICT(singleton) DO UPDATE SET
+                    start_block=EXCLUDED.start_block,end_block=EXCLUDED.end_block,
+                    next_block=CASE WHEN raw_backfill_runtime.start_block=EXCLUDED.start_block AND raw_backfill_runtime.end_block=EXCLUDED.end_block THEN raw_backfill_runtime.next_block ELSE EXCLUDED.next_block END,
+                    status=CASE WHEN raw_backfill_runtime.start_block=EXCLUDED.start_block AND raw_backfill_runtime.end_block=EXCLUDED.end_block THEN raw_backfill_runtime.status ELSE 'downloading' END,
+                    stored_blocks=CASE WHEN raw_backfill_runtime.start_block=EXCLUDED.start_block AND raw_backfill_runtime.end_block=EXCLUDED.end_block THEN raw_backfill_runtime.stored_blocks ELSE 0 END,
+                    failed_batches=CASE WHEN raw_backfill_runtime.start_block=EXCLUDED.start_block AND raw_backfill_runtime.end_block=EXCLUDED.end_block THEN raw_backfill_runtime.failed_batches ELSE 0 END,last_error=NULL,updated_at=NOW()""",
                     (first,last,first))
     finally:core.db_release(conn)
 
 
 def _live_has_priority():
-    if core._result_db_write_queue.qsize() or core._db_write_queue.qsize()>50:return True
-    countdown=core.calibrated_countdown_value()
-    if countdown<=12 or countdown>=59:return True
-    with core._live_blocks_lock:
-        recent=core._live_blocks.get(core._live_latest_number)
-    if not recent:return True
-    stamp=core._block_timestamp_seconds(recent.get('timestamp'))
-    return stamp is None or time.time()-stamp>8
+    # V10.4 is a dedicated historical job. No live collector competes with it.
+    return False
 
 
 def _normalize(raw):

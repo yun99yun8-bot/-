@@ -67,7 +67,7 @@ _prediction_context = {'key': None, 'value': None}
 _prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v10.2-fast-raw-warehouse-old-only-training'
+MODEL_VERSION = 'v10.4-history-10000-fast-only'
 RESEARCH_VERSION = 'research-family-v5-fixed-10000-loop'
 RESEARCH_ONLY_MODE = True
 
@@ -84,7 +84,7 @@ _tron_http_lock = threading.Lock()
 _tron_last_request_at = 0.0
 _tron_cooldown_until = 0.0
 _tron_rate_diag = {'last429At': None, 'cooldownUntil': None, 'requestCount': 0, '429Count': 0}
-TRON_MIN_REQUEST_INTERVAL = 0.85
+TRON_MIN_REQUEST_INTERVAL = float(os.environ.get('TRON_MIN_REQUEST_INTERVAL', '0.25'))
 TRON_429_COOLDOWN_SECONDS = 18.0
 TRON_PRO_API_KEY = os.environ.get('TRON_PRO_API_KEY', '').strip()
 
