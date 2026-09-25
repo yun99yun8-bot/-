@@ -11,8 +11,6 @@ import socket
 from urllib.parse import urlparse
 from datetime import datetime, timezone, timedelta, date
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import hash_research
-import research_selection
 
 try:
     import psycopg2
@@ -67,7 +65,7 @@ _prediction_context = {'key': None, 'value': None}
 _prediction_context_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v10.4-history-10000-fast-only'
+MODEL_VERSION = 'v10.5.1-history-plus-live'
 RESEARCH_VERSION = 'research-family-v5-fixed-10000-loop'
 RESEARCH_ONLY_MODE = True
 

@@ -12,6 +12,11 @@ import collector_core as core
 
 TARGET_PERIODS=10000
 RANGE_CHUNK=100
+_live_priority_until=0.0
+
+def mark_live_priority(seconds=2.0):
+    global _live_priority_until
+    _live_priority_until=max(_live_priority_until,time.monotonic()+float(seconds))
 
 
 def period_from_index(index):
@@ -75,8 +80,7 @@ def _initialize():
 
 
 def _live_has_priority():
-    # V10.4 is a dedicated historical job. No live collector competes with it.
-    return False
+    return time.monotonic() < _live_priority_until
 
 
 def _normalize(raw):
