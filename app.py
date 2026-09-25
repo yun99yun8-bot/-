@@ -64,7 +64,7 @@ _pending_ai_predictions = {}
 _pending_ai_lock = threading.Lock()
 _runtime_health = {'lastAiError': None, 'lastDbError': None, 'lastRepairAt': None, 'repairCount': 0, 'workerHeartbeats': {}, 'workerErrors': {}}
 _runtime_health_lock = threading.Lock()
-MODEL_VERSION = 'v9.4.6-ai-evidence-audit-1'
+MODEL_VERSION = 'v9.4.8-audit-prediction-distribution-1'
 
 _historical_singles_cache = {'key': None, 'at': 0, 'value': None}
 _historical_singles_cache_lock = threading.Lock()
@@ -2130,7 +2130,8 @@ def research_model_performance(limit=500):
     if conn is None: return perf
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""SELECT p.actual_single,p.ensemble_detail FROM ai_predictions p
+            cur.execute("""SELECT p.actual_single,p.ensemble_detail,p.period_date,p.period_no,p.target_block
+                           FROM ai_predictions p
                            JOIN tron_blocks b ON b.block_number=p.target_block
                            WHERE p.actual_single IS NOT NULL AND p.actual_single=b.single_count
                              AND p.ensemble_detail IS NOT NULL
@@ -2140,6 +2141,10 @@ def research_model_performance(limit=500):
                            ORDER BY p.period_date DESC,p.period_no DESC LIMIT %s""",(int(limit),))
             rows=cur.fetchall()
         for r in rows:
+            if r.get('period_date') is not None and r.get('target_block') is not None:
+                ds=r['period_date'].isoformat() if hasattr(r['period_date'],'isoformat') else str(r['period_date'])
+                if int(r['target_block'])!=period_target_block(ds,int(r['period_no'])):
+                    continue
             actual=int(r['actual_single']); detail=r.get('ensemble_detail') or {}
             if isinstance(detail,str):
                 try: detail=json.loads(detail)
@@ -2271,18 +2276,25 @@ def v9_research_ensemble(groups, historical, relation=None, hash_snapshot=None):
     # NOT evidence that any component can predict future hashes.
     prior={'binomial':0.25,'structure17':0.20,'relation':0.15,'short':0.12,
            'long':0.08,'transition':0.08,'omission':0.06,'hash_context':0.06}
-    # Verified paired lift can add a limited bonus. Poor or unverified models
-    # keep their small exploratory prior rather than masquerading as proven.
+    # Adjust only using predictions frozen before the compared result. Requiring
+    # 200 paired observations and 2.58 SE limits the chance that selecting from
+    # several models rewards a noisy short-run winner. Negative evidence shrinks
+    # a model that previously retained its full exploratory weight indefinitely.
     raww=dict(prior)
     if learned_scores is not None:raww['hash_learned']=0.35
+    weight_decisions={n:'exploratory' for n in raww}
     for n in parts:
         if n=='binomial': continue
         st=perf.get(n,{})
         nn=int(st.get('n') or 0)
         lift=float(st.get('pairedLift') or 0)
         se=float(st.get('pairedSE') or 0)
-        if nn>=100:
-            raww[n]+=min(0.15,max(0.0,(lift-1.64*se)/100.0)*2.0)
+        if nn>=200 and lift>2.58*se and lift>=2.0:
+            raww[n]+=min(0.80,(lift-2.58*se)/100.0*6.0)
+            weight_decisions[n]='validated_gain'
+        elif nn>=200 and lift< -2.58*se:
+            raww[n]=max(0.005,raww[n]*0.10)
+            weight_decisions[n]='validated_loss'
     sw=sum(raww.values()) or 1.0
     weights={n:raww[n]/sw for n in raww}
     score={i:sum(weights[n]*parts[n][i] for n in weights) for i in range(8)}
@@ -2305,7 +2317,8 @@ def v9_research_ensemble(groups, historical, relation=None, hash_snapshot=None):
             'confidence':round(confidence,1),'weights':weights,'components':parts,
             'research':{'mode':'hash_history_with_paired_oos','window':500,'performance':perf,
                         'edgeStatus':edge,'bestComplexTop1':round(best_complex,2),
-                        'baselineTop1':round(base_rate,2),'weightMode':'exploratory_prior_plus_verified_bonus',
+                        'baselineTop1':round(base_rate,2),'weightMode':'exploratory_prior_plus_strict_evidence',
+                        'weightDecisions':weight_decisions,
                         'hashModel':{k:hash_snapshot.get(k) for k in ('status','sample','testSample','trainedThrough','baselineLoss','modelLoss','active')}
                                     if hash_snapshot else None}}
 
@@ -2447,7 +2460,7 @@ def ai_audit_summary(rows, snapshot=None):
         except (TypeError,ValueError):top=[]
         actual=int(r['chain_single'])
         samples.append({'period':key,'targetBlock':expected,'top1':int(r['ai_analysis']),
-                        'top3':top,'actual':actual})
+                        'top3':top,'actual':actual,'modelVersion':r.get('model_version')})
     windows={}
     for n in (20,100,500,1000):
         recent=samples[:n]
@@ -2459,8 +2472,19 @@ def ai_audit_summary(rows, snapshot=None):
                          'baseline3Hits':baseline,
                          'top1Rate':round(top1/size*100,2) if size else None,
                          'top3Rate':round(top3/size*100,2) if size else None}
+    actual_counts={str(i):sum(x['actual']==i for x in samples) for i in range(8)}
+    predicted_counts={str(i):sum(x['top1']==i for x in samples) for i in range(8)}
+    versions={}
+    for x in samples:
+        name=str(x['modelVersion'] or '未标记版本')
+        bucket=versions.setdefault(name,{'verified':0,'top1Hits':0})
+        bucket['verified']+=1
+        bucket['top1Hits']+=int(x['top1']==x['actual'])
     snap=snapshot if isinstance(snapshot,dict) else {}
     return {'predictionRows':len(rows),'validSamples':len(samples),
+            'actualCounts':actual_counts,'predictedCounts':predicted_counts,
+            'modelVersions':versions,
+            'latestSavedVersion':str(rows[0].get('model_version') or '未标记版本') if rows else None,
             'invalidReasons':reasons,'windows':windows,'examples':issues,
             'hashModel':{k:snap.get(k) for k in ('status','sample','trainSample','tuneSample',
                 'testSample','active','alpha','baselineLoss','modelLoss','baselineTop1','modelTop1','trainedThrough')},
@@ -2599,6 +2623,7 @@ def prediction_summary(date_str, period, groups, target20, official, ui_countdow
         scores=ensemble_detail['scores']
     decision={'edgeStatus':research.get('edgeStatus','NO_EDGE'),'confidence':ensemble_detail.get('confidence'),
               'components':component_view,'windows':{str(k):v for k,v in windows.items()},
+              'weightDecisions':research.get('weightDecisions') or {},
               'outsideCandidate':outside_candidate(ensemble_detail.get('scores')) if (row or pending) else None,
               'hashModel':research.get('hashModel'),
               'baselineTop1':research.get('baselineTop1'),'bestComplexTop1':research.get('bestComplexTop1'),
@@ -2939,7 +2964,7 @@ def ai_audit():
             return jsonify({'ok':False,'error':'数据库暂不可用'}),503
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""SELECT p.period_key,p.period_date,p.period_no,p.target_block,
-                          p.ai_analysis,p.prediction_top3,p.actual_single,p.locked_at,
+                          p.ai_analysis,p.prediction_top3,p.actual_single,p.locked_at,p.model_version,
                           b.block_number,b.block_time,b.single_count AS chain_single
                           FROM ai_predictions p LEFT JOIN tron_blocks b ON b.block_number=p.target_block
                           ORDER BY p.period_date DESC,p.period_no DESC LIMIT %s""",(limit,))
@@ -2948,7 +2973,8 @@ def ai_audit():
             stored=cur.fetchone()
         snapshot=stored['snapshot'] if stored else None
         if isinstance(snapshot,str):snapshot=json.loads(snapshot)
-        return jsonify({'ok':True,'audit':ai_audit_summary(rows,snapshot)})
+        return jsonify({'ok':True,'currentModelVersion':MODEL_VERSION,
+                        'audit':ai_audit_summary(rows,snapshot)})
     except Exception as exc:
         return jsonify({'ok':False,'error':type(exc).__name__,'message':str(exc)[:140]}),503
     finally:

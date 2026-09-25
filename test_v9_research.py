@@ -90,7 +90,7 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(result['weights']['binomial'], 0.25)
         self.assertGreater(result['weights']['structure17'], 0)
         self.assertEqual(result['research']['edgeStatus'], 'NO_EDGE')
-        self.assertEqual(result['research']['weightMode'], 'exploratory_prior_plus_verified_bonus')
+        self.assertEqual(result['research']['weightMode'], 'exploratory_prior_plus_strict_evidence')
 
     def test_strong_pre_result_structure_can_move_top1_beyond_three_four(self):
         scope['db_connect'] = lambda: None
@@ -121,6 +121,28 @@ class ResearchTests(unittest.TestCase):
         result = scope['v9_research_ensemble']({}, [3, 4] * 60)
         self.assertGreater(result['weights']['short'], 0)
         self.assertEqual(result['research']['edgeStatus'], 'EVIDENCE')
+
+    def test_strong_verified_rare_class_signal_can_override_three_four(self):
+        scope['research_model_performance'] = lambda _: {
+            'short': {'n': 300, 'pairedLift': 20.0, 'pairedSE': 2.0,
+                      'top1Rate': 49.0},
+            'long': {'n': 300, 'pairedLift': -15.0, 'pairedSE': 2.0,
+                     'top1Rate': 12.0},
+            'binomial': {'n': 300, 'top1Rate': 29.0}}
+        history=[2]*120+[3,4]*200
+        result=scope['v9_research_ensemble']({},history)
+        self.assertEqual(result['single'],2)
+        self.assertEqual(result['research']['weightDecisions']['short'],'validated_gain')
+        self.assertEqual(result['research']['weightDecisions']['long'],'validated_loss')
+        self.assertGreater(result['weights']['short'],result['weights']['binomial'])
+
+    def test_small_apparent_gain_does_not_reweight(self):
+        scope['research_model_performance'] = lambda _: {
+            'short': {'n': 90, 'pairedLift': 60.0, 'pairedSE': 2.0},
+            'binomial': {'n': 90, 'top1Rate': 25.0}}
+        result=scope['v9_research_ensemble']({},[3,4]*100)
+        self.assertEqual(result['research']['weightDecisions']['short'],'exploratory')
+        self.assertEqual(result['weights']['short'],0.12)
 
 
 if __name__ == '__main__': unittest.main()

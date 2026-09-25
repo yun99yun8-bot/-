@@ -21,7 +21,8 @@ class AIAuditTests(unittest.TestCase):
         row={'period_date':date(2026,9,25),'period_no':275,'period_key':'2026-09-25:0275',
              'target_block':target,'block_number':target,'block_time':publication,
              'locked_at':publication-timedelta(seconds=8),'chain_single':3,
-             'actual_single':3,'ai_analysis':3,'prediction_top3':[3,4,2]}
+             'actual_single':3,'ai_analysis':3,'prediction_top3':[3,4,2],
+             'model_version':'v9.4.8-audit-prediction-distribution-1'}
         hit=dict(row)
         second=dict(row,period_no=274,period_key='2026-09-25:0274',
                     target_block=target-20,block_number=target-20,ai_analysis=4)
@@ -41,6 +42,11 @@ class AIAuditTests(unittest.TestCase):
         self.assertEqual(result['invalidReasons']['blockMissing'],1)
         self.assertEqual(result['invalidReasons']['notLockedBeforeBlock'],1)
         self.assertEqual(result['hashModel']['sample'],650)
+        self.assertEqual(result['actualCounts']['3'],2)
+        self.assertEqual(result['predictedCounts']['3'],1)
+        self.assertEqual(result['predictedCounts']['4'],1)
+        self.assertEqual(result['modelVersions'][row['model_version']],{'verified':2,'top1Hits':1})
+        self.assertEqual(result['latestSavedVersion'],row['model_version'])
 
 
 if __name__=='__main__':unittest.main()

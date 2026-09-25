@@ -122,8 +122,10 @@
     var xhr=new XMLHttpRequest();xhr.open('GET','/api/ai-audit?limit=1000&t='+Date.now(),true);xhr.timeout=12000;
     xhr.onreadystatechange=function(){if(xhr.readyState!==4)return;
       if(xhr.status<200||xhr.status>=300){box.textContent='诊断暂不可用，请检查数据库连接。';return;}
-      try{var data=JSON.parse(xhr.responseText),a=data.audit||{},w=a.windows||{},v=w['1000']||{},c=a.invalidReasons||{},h=a.hashModel||{};
+      try{var data=JSON.parse(xhr.responseText),a=data.audit||{},w=a.windows||{},v=w['1000']||{},c=a.invalidReasons||{},h=a.hashModel||{},pred=a.predictedCounts||{},actual=a.actualCounts||{},versions=a.modelVersions||{},current=data.currentModelVersion||'未知',latest=a.latestSavedVersion||'无';
         var pct=function(x){return x==null?'--':Number(x).toFixed(1)+'%';};
+        var distribution=function(counts){return Array.from({length:8},function(_,i){return '单'+i+':'+Number(counts[String(i)]||0);}).join('、');};
+        var cohort=versions[current]||{},versionStatus=latest===current?'当前版本已有有效记录':'最近保存的预测尚非当前版本';
         box.textContent='最近'+Number(a.predictionRows||0)+'条预测：可验证'+Number(a.validSamples||0)+'条；'+
           '第一名 '+Number(v.top1Hits||0)+'/'+Number(v.verified||0)+'（'+pct(v.top1Rate)+'）；'+
           '前三 '+Number(v.top3Hits||0)+'/'+Number(v.verified||0)+'（'+pct(v.top3Rate)+'）；'+
@@ -132,6 +134,8 @@
           '、锁定晚于区块'+Number(c.notLockedBeforeBlock||0)+'、未验证'+Number(c.notVerified||0)+
           '、结果不一致'+Number(c.actualMismatch||0)+'。'+
           '哈希模型完整期'+Number(h.sample||0)+'、留出'+Number(h.testSample||0)+'期、'+(h.active?'已通过验证并启用':'未通过验证/未启用')+'。'+
+          '当前程序版本：'+current+'；最近保存版本：'+latest+'（'+versionStatus+'），当前版本有效'+Number(cohort.verified||0)+'期、第一名命中'+Number(cohort.top1Hits||0)+'期。'+
+          '有效期预测分布：'+distribution(pred)+'；实际分布：'+distribution(actual)+'。'+
           '本页仅核对程序保存的数据，平台开奖结果仍需按同一期号对照。';
       }catch(e){box.textContent='诊断返回数据解析失败。';}
     };xhr.onerror=function(){box.textContent='诊断连接失败。';};xhr.ontimeout=xhr.onerror;xhr.send(null);
@@ -273,7 +277,8 @@
     }
     if(spectrum)spectrum.innerHTML=spectrumHTML;
     var comps=Array.isArray(dec.components)?dec.components:[], mh='';
-    for(var mi=0;mi<comps.length;mi++){var mc=comps[mi], ms=(mc.single===0||mc.single)?('单'+mc.single):'--', rr=mc.top1Rate!=null?Number(mc.top1Rate).toFixed(1)+'% / '+Number(mc.sample||0)+'期':'积累中'; mh+='<div class=\"ai-model-item\"><b>'+mc.label+'</b><strong>'+ms+'</strong><small>权重 '+Number(mc.weight||0).toFixed(1)+'% · OOS '+rr+'</small></div>';}
+    var weightLabels={validated_gain:'验证加权',validated_loss:'验证降权',exploratory:'探索权重'};
+    for(var mi=0;mi<comps.length;mi++){var mc=comps[mi], ms=(mc.single===0||mc.single)?('单'+mc.single):'--', rr=mc.top1Rate!=null?Number(mc.top1Rate).toFixed(1)+'% / '+Number(mc.sample||0)+'期':'积累中', wt=weightLabels[(dec.weightDecisions||{})[mc.key]]||'探索权重'; mh+='<div class=\"ai-model-item\"><b>'+mc.label+'</b><strong>'+ms+'</strong><small>权重 '+Number(mc.weight||0).toFixed(1)+'% · '+wt+' · OOS '+rr+'</small></div>';}
     if(mh)document.getElementById('aiModelGrid').innerHTML=mh;
     var ww=dec.windows||{}, w20=ww['20']||{},w100=ww['100']||{},w500=ww['500']||{};
     function wr(v){return v&&v.n?('第一名 '+v.hit+'/'+v.n+' · '+Number(v.top1Rate||0).toFixed(1)+'%；前三 '+v.top3+'/'+v.n+' · '+Number(v.top3Rate||0).toFixed(1)+'%'):'无有效验证样本';}
